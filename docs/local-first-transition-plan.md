@@ -572,126 +572,123 @@ The desktop app behaves like a coherent local product instead of a cloud product
 
 ## Recommended task packets for multi-model execution
 
-## Packet A — config and local-mode scaffolding
-**Size:** small/medium  
+### Capsule rules
+- One owner, one file cluster, one outcome.
+- If a packet spans two concerns or more than ~3 files, split it before assigning.
+- Every handoff should carry: goal, files, dependencies, non-goals, and done criteria.
+
+### Packet A — config and local-mode scaffolding
 **Good for:** GPT-5.4-mini / GLM 5.1  
-**Depends on:** none
+**Depends on:** none  
+**Files:** `desktop/run.sh`, `desktop/.env.example`, `desktop/Backend-Rust/src/config.rs`, Python env/template files
 
-Includes:
-- env/config plumbing
-- port/path contracts
-- feature flags
-- docs bootstrap
+**Goal:** add a single `LOCAL_MODE` contract across desktop app, Rust backend, and Python worker.
+**Non-goals:** auth, storage, or route rewrites.
+**Done:** app/backend/worker all read the same mode, ports, and path contracts.
 
-## Packet B — desktop auth bypass / local identity
-**Size:** medium  
+### Packet B — desktop auth bypass / local identity
 **Good for:** GPT-5.4-mini / GLM 5.1  
-**Depends on:** Packet A
+**Depends on:** Packet A  
+**Files:** `desktop/Desktop/Sources/AuthService.swift`, `desktop/Desktop/Sources/OmiApp.swift`, `desktop/run.sh`, `desktop/Auth-Python/`, `desktop/Backend-Rust/src/auth.rs`, `desktop/Backend-Rust/src/main.rs`
 
-Includes:
-- `AuthService.swift`
-- local sign-in bootstrap
-- disable Auth-Python in local mode
+**Goal:** boot local mode without Firebase/Auth-Python and create a local identity record.
+**Non-goals:** hosted auth redesign.
+**Done:** fresh local launches authenticate against localhost and hosted mode still works.
 
-## Packet C — Rust backend auth and localhost security
-**Size:** medium  
+### Packet C — Rust backend auth and localhost security
 **Good for:** GPT-5.4-mini / GLM 5.1  
-**Depends on:** Packet A
+**Depends on:** Packet A  
+**Files:** `desktop/Backend-Rust/src/auth.rs`, `desktop/Backend-Rust/src/main.rs`
 
-Includes:
-- `desktop/Backend-Rust/src/auth.rs`
-- local token extractor
-- bind-to-loopback behavior
+**Goal:** accept local loopback auth and lock the backend to localhost.
+**Non-goals:** storage migrations or app UI changes.
+**Done:** local token/session extraction works, and non-loopback access is rejected.
 
-## Packet D — Rust repository abstraction + SQLite bootstrap
-**Size:** large  
+### Packet D — Rust repository abstraction + SQLite bootstrap
 **Good for:** MiniMax 2.7  
-**Depends on:** Packet A, C
+**Depends on:** Packet A, C  
+**Split before assignment:** yes — D1 = trait/schema extraction, D2 = SQLite + migrations.
+**Files:** `desktop/Backend-Rust/src/services/firestore.rs`, `desktop/Backend-Rust/src/routes/*`, new Rust storage modules
 
-Includes:
-- extract storage traits
-- local SQLite implementation
-- migration/bootstrap
+**Goal:** extract backend storage traits and stand up backend-owned SQLite.
+**Non-goals:** route parity or filesystem blobs.
+**Done:** profile/settings/conversations/memories/tasks/goals persist locally.
 
-## Packet E — filesystem storage adapter
-**Size:** medium  
+### Packet E — filesystem storage adapter
 **Good for:** GLM 5.1 / GPT-5.4-mini  
-**Depends on:** Packet A
+**Depends on:** Packet A  
+**Files:** `backend/utils/other/storage.py`, local storage helpers in Rust if needed
 
-Includes:
-- local replacements for GCS-backed file flows
-- path management
-- tests
+**Goal:** replace GCS-backed file flows with local filesystem storage.
+**Non-goals:** vector search or conversation processing.
+**Done:** speech profiles, audio, and uploads land on disk with stable paths.
 
-## Packet F — local CRUD route parity in Rust
-**Size:** large  
+### Packet F — local CRUD route parity in Rust
 **Good for:** MiniMax 2.7  
-**Depends on:** Packet D, E
+**Depends on:** Packet D, E  
+**Split before assignment:** yes — F1 = route audit, F2 = missing endpoints + stubs.
+**Files:** `desktop/Backend-Rust/src/routes/*`, `desktop/Desktop/Sources/APIClient.swift`, `desktop/Backend-Rust/src/main.rs`
 
-Includes:
-- route gap audit
-- missing local endpoints
-- local-mode stubs for unsupported features
+**Goal:** keep the normal desktop CRUD surface local in Rust.
+**Non-goals:** payments, Agent VM, or other cloud-only features.
+**Done:** conversations, memories, tasks, goals, sessions, and settings work locally.
 
-## Packet G — local PTT transcription
-**Size:** medium/large  
+### Packet G — local PTT transcription
 **Good for:** MiniMax 2.7 or strong GLM run  
-**Depends on:** Packet A, B, C, E
+**Depends on:** Packet A, B, C, E  
+**Files:** `desktop/Desktop/Sources/TranscriptionService.swift`, `backend/routers/transcribe.py`, `backend/utils/stt/streaming.py`
 
-Includes:
-- local `/v2/voice-message/transcribe*`
-- Whisper/faster-whisper integration
-- Swift compatibility
+**Goal:** make push-to-talk transcription work locally.
+**Non-goals:** full continuous-capture parity.
+**Done:** `/v2/voice-message/transcribe*` works against a local STT backend and the Swift client stays compatible.
 
-## Packet H — local continuous `/v4/listen`
-**Size:** large  
+### Packet H — local continuous `/v4/listen`
 **Good for:** MiniMax 2.7  
-**Depends on:** Packet G, D, E
+**Depends on:** Packet G, D, E  
+**Split before assignment:** yes — H1 = websocket transport, H2 = event/rotation semantics.
+**Files:** `backend/routers/listen.py`, `backend/utils/stt/streaming.py`, listen pipeline modules
 
-Includes:
-- WebSocket compatibility
-- local conversation rotation
-- event compatibility
+**Goal:** replace the hosted listen transport with a local WebSocket path.
+**Non-goals:** perfect diarization parity.
+**Done:** local conversation rotation and listen events work over localhost.
 
-## Packet I — local conversation processing / pusher replacement
-**Size:** very large  
+### Packet I — local conversation processing / pusher replacement
 **Good for:** MiniMax 2.7 only  
-**Depends on:** Packet H, D, E, provider abstraction
+**Depends on:** Packet H, D, E, provider abstraction  
+**Split before assignment:** yes — I1 = queue/runner, I2 = summaries/tasks/memories/writeback.
+**Files:** `backend/pusher/`, `backend/utils/conversations/process_conversation.py`, `backend/utils/llm/conversation_processing.py`, `backend/database/vector_db.py`
 
-Includes:
-- local queue/runner
-- summary/task/memory generation
-- storage writeback
+**Goal:** process completed conversations locally instead of via hosted pusher.
+**Non-goals:** rewriting the entire processing stack to Rust first.
+**Done:** a completed local conversation produces summary/task/memory outputs and writes them locally.
 
-## Packet J — model provider abstraction
-**Size:** large  
+### Packet J — model provider abstraction
 **Good for:** MiniMax 2.7  
-**Depends on:** Packet A
+**Depends on:** Packet A  
+**Split before assignment:** yes — J1 = provider interface, J2 = Rust/Python callsites.
+**Files:** `backend/utils/llm/clients.py`, `desktop/Backend-Rust/src/llm/client.rs`, `desktop/Backend-Rust/src/routes/chat.rs`
 
-Includes:
-- OpenAI-compatible local endpoint support
-- embeddings + chat + extraction mapping
-- Rust + Python adapters
+**Goal:** support OpenAI-compatible local endpoints for chat, extraction, and embeddings.
+**Non-goals:** changing the desktop UX yet.
+**Done:** local mode can run without cloud LLM credentials.
 
-## Packet K — local search fallback + vector phase 1
-**Size:** medium  
+### Packet K — local search fallback + vector phase 1
 **Good for:** GPT-5.4-mini / GLM 5.1  
-**Depends on:** Packet D, J
+**Depends on:** Packet D, J  
+**Files:** `backend/database/vector_db.py`, `desktop/Backend-Rust/src/routes/screen_activity.rs`, chat/context retrieval paths
 
-Includes:
-- lexical fallback
-- embedding backfill hooks
-- semantic search defer path
+**Goal:** keep retrieval useful without Pinecone.
+**Non-goals:** full semantic parity on day one.
+**Done:** lexical/FTS fallback works and vector backfill hooks exist.
 
-## Packet L — local UX cleanup
-**Size:** medium  
+### Packet L — local UX cleanup
 **Good for:** GPT-5.4-mini / GLM 5.1  
-**Depends on:** Packets B, F, G minimum
+**Depends on:** Packets B, F, G minimum  
+**Files:** onboarding/settings Swift screens, subscription/billing flows
 
-Includes:
-- onboarding/settings cleanup
-- disable billing/hosted-only UI
-- diagnostics UI
+**Goal:** make the app feel like a coherent local product.
+**Non-goals:** any hosted-only feature expansion.
+**Done:** local onboarding, diagnostics, and cloud-only feature hiding are in place.
 
 ---
 
