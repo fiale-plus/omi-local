@@ -352,7 +352,8 @@ else
 fi
 
 # ─── Start Python auth service ────────────────────────────────────────
-if [ "${OMI_SKIP_AUTH:-0}" != "1" ]; then
+# Skip auth service if OMI_SKIP_AUTH=*** or LOCAL_MODE=1 (local auth bypass)
+if [ "${OMI_SKIP_AUTH:-0}" != "1" ] && [ "${LOCAL_MODE:-0}" != "1" ]; then
     step "Starting Python auth service (port $AUTH_PORT)..."
     if [ -d "$AUTH_DIR" ]; then
         # Set up venv if needed
@@ -383,7 +384,7 @@ if [ "${OMI_SKIP_AUTH:-0}" != "1" ]; then
         substep "Auth-Python/ not found — skipping (auth will use OMI_AUTH_URL from .env)"
     fi
 else
-    substep "Skipping auth service (OMI_SKIP_AUTH=1) — using OMI_AUTH_URL from .env"
+    substep "Skipping auth service (OMI_SKIP_AUTH=*** or LOCAL_MODE=1 — using OMI_AUTH_URL from .env)"
 fi
 
 # Check if another SwiftPM instance is running (will block our build)
@@ -562,6 +563,15 @@ if ! grep -q "^OMI_PYTHON_API_URL=" "$APP_BUNDLE/Contents/Resources/.env"; then
     echo "OMI_PYTHON_API_URL=$PYTHON_API_URL" >> "$APP_BUNDLE/Contents/Resources/.env"
     substep "Set OMI_PYTHON_API_URL=$PYTHON_API_URL"
 fi
+# Bootstrap LOCAL_MODE — set to 1 in the app's .env so AuthService skips Firebase
+if [ "${LOCAL_MODE:-0}" = "1" ]; then
+    if grep -q "^LOCAL_MODE=" "$APP_BUNDLE/Contents/Resources/.env"; then
+        sed -i '' "s|^LOCAL_MODE=.*|LOCAL_MODE=1|" "$APP_BUNDLE/Contents/Resources/.env"
+    else
+        echo "LOCAL_MODE=1" >> "$APP_BUNDLE/Contents/Resources/.env"
+    fi
+    substep "LOCAL_MODE=1 — app will bypass Firebase Auth"
+fi
 
 substep "Copying app icon"
 cp -f omi_icon.icns "$APP_BUNDLE/Contents/Resources/OmiIcon.icns" 2>/dev/null || true
@@ -737,8 +747,21 @@ echo "========================================"
 echo ""
 
 auth_debug "BEFORE launch: $(defaults read "$BUNDLE_ID" auth_isSignedIn 2>&1 || true)"
+# Build launch args: LOCAL_MODE if set, plus automation bridge args
+LAUNCH_ARGS=()
+if [ "${LOCAL_MODE:-0}" = "1" ]; then
+    LAUNCH_ARGS+=(--LOCAL_MODE=1)
+    substep "LOCAL_MODE=1 — Firebase auth bypassed"
+fi
 if [ "${#AUTOMATION_ARGS[@]}" -gt 0 ]; then
-    open "$APP_PATH" --args "${AUTOMATION_ARGS[@]}" || "$APP_PATH/Contents/MacOS/$BINARY_NAME" "${AUTOMATION_ARGS[@]}" &
+    LAUNCH_ARGS+=("${AUTOMATION_ARGS[@]}")
+fi
+
+# In LOCAL_MODE, also export LOCAL_MODE=1 so the app's ProcessInfo sees it
+if [ "${LOCAL_MODE:-0}" = "1" ]; then
+    (export LOCAL_MODE=1 && open "$APP_PATH" --args "${LAUNCH_ARGS[@]}" || "$APP_PATH/Contents/MacOS/$BINARY_NAME" "${LAUNCH_ARGS[@]}") &
+elif [ ${#LAUNCH_ARGS[@]} -gt 0 ]; then
+    open "$APP_PATH" --args "${LAUNCH_ARGS[@]}" || "$APP_PATH/Contents/MacOS/$BINARY_NAME" "${LAUNCH_ARGS[@]}" &
 else
     open "$APP_PATH" || "$APP_PATH/Contents/MacOS/$BINARY_NAME" &
 fi

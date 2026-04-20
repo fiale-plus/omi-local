@@ -339,13 +339,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     log("Sentry initialized (environment: \(isDev ? "development" : "production"))")
 
-    // Initialize Firebase
+    // Initialize Firebase (skip in LOCAL_MODE — AuthService uses stored tokens only)
     let plistPath = Bundle.main.path(forResource: "GoogleService-Info", ofType: "plist")
+    let isLocalMode = ProcessInfo.processInfo.environment["LOCAL_MODE"] == "1"
 
-    if let path = plistPath,
+    if !isLocalMode, let path = plistPath,
       let options = FirebaseOptions(contentsOfFile: path)
     {
       FirebaseApp.configure(options: options)
+      AuthService.shared.configure()
+    } else if isLocalMode {
+      NSLog("AppDelegate: LOCAL_MODE enabled — skipping Firebase initialization, configuring AuthService directly")
       AuthService.shared.configure()
     }
 
