@@ -10,9 +10,10 @@ Build and run the Omi Desktop dev app with local backend services.
 
 Options (via environment variables):
   OMI_SKIP_BACKEND=1      Skip starting Rust backend (use remote backend via OMI_API_URL)
-  OMI_SKIP_AUTH=1          Skip starting Python auth service (use remote auth via OMI_AUTH_URL)
-  OMI_SKIP_TUNNEL=1        Skip Cloudflare tunnel (use OMI_API_URL from .env directly)
-  AUTH_PORT=10200           Auth service port (default: 10200)
+  OMI_SKIP_AUTH=1         Skip starting Python auth service (use remote auth via OMI_AUTH_URL)
+  OMI_SKIP_TUNNEL=1       Skip Cloudflare tunnel (use OMI_API_URL from .env directly)
+  LOCAL_MODE=1            Skip all local services — use OMI_API_URL, OMI_AUTH_URL, and OMI_PYTHON_API_URL from .env directly
+  AUTH_PORT=10200         Auth service port (default: 10200)
   PORT=10201                Rust backend port (default: 10201, never use 8080)
   OMI_APP_NAME="Omi Dev"   App name (default: "Omi Dev")
   OMI_PYTHON_API_URL="..."  Python backend URL (subscriptions, payments, etc; default: https://api.omi.me)
@@ -62,6 +63,26 @@ if [ "$1" = "--yolo" ]; then
     export OMI_PYTHON_API_URL="https://api.omi.me"
     export OMI_AUTH_URL="https://omi-desktop-auth-208440318997.us-central1.run.app/"
     export FIREBASE_API_KEY="AIzaSyD9dzBdglc7IO9pPDIOvqnCoTis_xKkkC8"
+fi
+
+# ─── Local Mode ─────────────────────────────────────────────────────
+# Fully local dev without starting any services. The app uses the
+# OMI_API_URL, OMI_AUTH_URL, and OMI_PYTHON_API_URL values directly.
+if [ "${LOCAL_MODE:-0}" = "1" ]; then
+    echo ""
+    echo "=========================================="
+    echo "  LOCAL MODE — using URLs from .env"
+    echo "=========================================="
+    echo ""
+    echo "  Skipping: Rust backend, Python auth, Cloudflare tunnel"
+    echo "  Using OMI_API_URL=${OMI_API_URL:-http://localhost:10201}"
+    echo ""
+    echo "=========================================="
+    echo ""
+
+    export OMI_SKIP_BACKEND=1
+    export OMI_SKIP_AUTH=1
+    export OMI_SKIP_TUNNEL=1
 fi
 
 # Clear system OPENAI_API_KEY so .env takes precedence
