@@ -89,6 +89,8 @@ pub struct Config {
     pub local_mode: bool,
     /// Path for the local SQLite database (default: ./omi_local.db)
     pub local_db_path: Option<String>,
+    /// Bind to localhost only (for development)
+    pub bind_localhost: bool,
 }
 
 impl Config {
@@ -164,6 +166,7 @@ impl Config {
                 .unwrap_or_else(|_| "us-central1".to_string()),
             local_mode: env::var("LOCAL_MODE").ok().map(|v| v == "1" || v.to_lowercase() == "true").unwrap_or(false),
             local_db_path: env::var("LOCAL_DB_PATH").ok(),
+            bind_localhost: env::var("BIND_LOCALHOST").map(|v| v == "true").unwrap_or(false),
         }
     }
 
@@ -180,6 +183,12 @@ impl Config {
             );
         } else if self.gemini_api_key.is_none() {
             tracing::warn!("GEMINI_API_KEY not set - conversation processing will fail");
+        }
+        if self.local_mode {
+            tracing::warn!("LOCAL_MODE enabled - using development auth bypass (DO NOT USE IN PRODUCTION)");
+        }
+        if self.bind_localhost {
+            tracing::info!("BIND_LOCALHOST enabled - server will listen on 127.0.0.1 only");
         }
         if self.redis_host.is_none() {
             tracing::warn!("REDIS_DB_HOST not set - conversation visibility/sharing will not work");
