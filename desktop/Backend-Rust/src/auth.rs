@@ -24,6 +24,8 @@ pub struct FirebaseAuth {
     client: Client,
     /// Firebase project ID
     project_id: String,
+    /// Local mode bypass (for development only)
+    local_mode: bool,
 }
 
 /// JWT Claims from Firebase ID token
@@ -81,11 +83,12 @@ impl IntoResponse for AuthError {
 
 impl FirebaseAuth {
     /// Create a new Firebase Auth verifier
-    pub fn new(project_id: String) -> Self {
+    pub fn new(project_id: String, local_mode: bool) -> Self {
         Self {
             keys: Arc::new(RwLock::new(HashMap::new())),
             client: Client::new(),
             project_id,
+            local_mode,
         }
     }
 
@@ -114,6 +117,17 @@ impl FirebaseAuth {
 
     /// Verify a Firebase ID token and extract the user ID and name
     pub async fn verify_token(&self, token: &str) -> Result<(String, Option<String>, Option<String>), AuthError> {
+        // LOCAL_MODE bypass for development
+        if self.local_mode {
+            tracing::debug!("LOCAL_MODE auth bypass - accepting development token");
+            // Return hardcoded dev user
+            return Ok((
+                "123".to_string(),
+                Some("Local Dev User".to_string()),
+                Some("dev@localhost".to_string()),
+            ));
+        }
+
         // Decode header to get kid
         let header = decode_header(token).map_err(|e| AuthError {
             error: "invalid_token".to_string(),
