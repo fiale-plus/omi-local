@@ -6,11 +6,22 @@ description: "Sequence diagrams for the /v4/listen WebSocket and Pusher processi
 
 # Listen + Pusher Pipeline — Sequence Diagrams
 
-> Last updated: 2026-03-28 (PR #6061 — remove local fallback)
+> Last updated: 2026-04-21 (Packet I — Local conversation processing)
 >
 > These diagrams document the real behavior observed during E2E testing with
 > live services (backend, pusher, Deepgram, embedding API). Update when the
 > pipeline changes.
+
+## LOCAL_MODE Overview
+
+When `LOCAL_MODE=true`, the entire pipeline runs without cloud services:
+
+- **STT**: Local faster-whisper (`/v4/local/listen` WebSocket)
+- **LLM Processing**: Local OpenAI-compatible endpoint (`LOCAL_LLM_BASE_URL`, `LOCAL_LLM_MODEL`)
+- **Storage**: Local SQLite database at `~/.omi/local/omi_local.db`
+- **Search**: SQLite FTS5 fallback instead of Pinecone
+
+No Firebase, Firestore, GCS, Deepgram, or pusher service is used in LOCAL_MODE.
 
 ## 1. Connection + Streaming + Transcription
 
@@ -264,7 +275,79 @@ sequenceDiagram
 | Pusher audio batch | 60s | pusher | GCS upload batch size |
 | Speaker match threshold | 0.45 | transcribe.py | Cosine distance cutoff |
 | `PENDING_REQUEST_TIMEOUT` | 120s | transcribe.py | Timeout before retrying a pending request |
-| `MAX_RETRIES_PER_REQUEST` | 3 | transcribe.py | Max retries before keeping buffered |
+|| `MAX_RETRIES_PER_REQUEST` | 3 | transcribe.py | Max retries before keeping buffered |
 | `PUSHER_MAX_RECONNECT_ATTEMPTS` | 6 | transcribe.py | Reconnect attempts before DEGRADED |
 | `MAX_PENDING_REQUESTS` | 100 | transcribe.py | Max buffered conversations per session |
+
+## LOCAL_MODE Processing Flow
+
+When `LOCAL_MODE=true`, the pusher service is replaced with in-process local processing:
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Backend as Backend (/v4/local/listen)
+    participant LocalSTT as Local STT (faster-whisper)
+    participant LocalDB as Local SQLite
+    participant LocalLLM as Local LLM (OpenAI-compatible)
+    participant LocalFTS as Local FTS5
+
+    Note over Client: LOCAL_MODE enabled
+
+    Client->>Backend: WS connect (/v4/local/listen)
+    Backend->>LocalSTT: Initialize session
+    Backend-->>Client: {type: "ready", status: "listening"}
+
+    loop Audio Streaming
+        Client->>Backend: PCM audio bytes
+        Backend->>LocalSTT: Forward audio
+        LocalSTT-->>Backend: Transcript segments
+        Backend-->>Client: {type: "transcript", segments: [...]}
+    end
+
+    Note over Client: Silence timeout or disconnect
+
+    Backend->>LocalDB: Save conversation (pending)
+    Backend->>Backend: Trigger local processing
+
+    par Parallel Extraction
+        Backend->>LocalLLM: Extract title, overview, category, emoji
+        LocalLLM-->>Backend: Structured data
+    and
+        Backend->>LocalLLM: Extract action items
+        LocalLLM-->>Backend: Action items list
+    and
+        Backend->>LocalLLM: Extract memories
+        LocalLLM-->>Backend: Memories list
+    end
+
+    Backend->>LocalDB: Save structured conversation
+    Backend->>LocalFTS: Index conversation
+    Backend->>LocalFTS: Index memories
+
+    Backend-->>Client: {type: "conversation_end", conversation_id}
+```
+
+### Local Processing Endpoint
+
+```
+POST /v4/local/conversations/{conversation_id}/process
+```
+
+Triggers local LLM processing for a conversation:
+1. Loads conversation from local SQLite
+2. Calls local LLM for structure extraction
+3. Calls local LLM for action items
+4. Calls local LLM for memories
+5. Saves results to local SQLite and FTS5
+
+### Files Involved
+
+| File | Purpose |
+|------|---------|
+| `backend/database/local_db.py` | Local SQLite storage |
+| `backend/database/local_fts.py` | SQLite FTS5 search |
+| `backend/utils/conversations/local_process_conversation.py` | Local LLM processing |
+| `backend/routers/local_listen.py` | WebSocket + processing endpoint |
+| `backend/utils/stt/local_listen.py` | Local STT session |
 

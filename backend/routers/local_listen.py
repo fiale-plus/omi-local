@@ -351,15 +351,28 @@ async def local_listen_status(uid: str):
 async def local_process_conversation(
     conversation_id: str,
     uid: str,
+    language: str = "en",
 ):
     """
     Trigger local processing for a conversation.
     
     In LOCAL_MODE, this triggers local LLM processing instead of
-    routing to pusher service.
+    routing to pusher service. Uses the local SQLite database for
+    storage and local LLM for extraction.
     """
     if not is_local_stt_enabled():
         return {"error": "Local mode not enabled"}
+    
+    # Check if local processing is available
+    try:
+        from utils.conversations.local_process_conversation import is_local_processing_available
+        if not is_local_processing_available():
+            return {
+                "error": "Local LLM not configured",
+                "detail": "Set LOCAL_LLM_BASE_URL and LOCAL_LLM_MODEL to enable local processing"
+            }
+    except ImportError:
+        return {"error": "Local processing module not available"}
     
     # Find the conversation file
     storage_dir = _get_local_storage_dir(uid)
@@ -372,13 +385,30 @@ async def local_process_conversation(
     with open(segments_file, "r") as f:
         conversation = json.load(f)
     
-    # In LOCAL_MODE, we'd trigger local LLM processing here
-    # For now, just mark as processing
+    # Save to local SQLite first
+    try:
+        from database.local_db import upsert_conversation
+        upsert_conversation(uid, conversation)
+    except Exception as e:
+        logger.warning(f"Failed to save conversation to local DB: {e}")
+    
+    # Mark as processing
     conversation["status"] = "processing"
     conversation["processing_started_at"] = datetime.now(timezone.utc).isoformat()
     
     with open(segments_file, "w") as f:
         json.dump(conversation, f, indent=2)
+    
+    # Trigger local LLM processing in background
+    try:
+        from utils.conversations.local_process_conversation import process_conversation_locally
+        import asyncio
+        asyncio.create_task(
+            process_conversation_locally(uid, conversation_id, language)
+        )
+    except Exception as e:
+        logger.error(f"Failed to start local processing: {e}")
+        return {"error": f"Failed to start processing: {e}"}
     
     return {
         "conversation_id": conversation_id,
