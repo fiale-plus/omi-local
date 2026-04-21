@@ -92,6 +92,14 @@ class AuthService {
         return ""
     }
 
+    /// Whether to bypass Firebase and use local stored tokens only (LOCAL_MODE=1)
+    var isLocalMode: Bool {
+        if let env = getenv("LOCAL_MODE"), let val = String(validatingUTF8: env), !val.isEmpty {
+            return val == "1" || val.lowercased() == "true"
+        }
+        return false
+    }
+
     // MARK: - User Name Properties
 
     /// Get the user's given name (first name)
@@ -156,8 +164,22 @@ class AuthService {
         let savedSignedIn = UserDefaults.standard.bool(forKey: kAuthIsSignedIn)
         let savedEmail = UserDefaults.standard.string(forKey: kAuthUserEmail)
 
-        NSLog("OMI AUTH: Checking saved auth state - savedSignedIn: %@, savedEmail: %@",
-              savedSignedIn ? "true" : "false", savedEmail ?? "nil")
+        NSLog("OMI AUTH: Checking saved auth state - savedSignedIn: %@, savedEmail: %@, isLocalMode: %@",
+              savedSignedIn ? "true" : "false", savedEmail ?? "nil", isLocalMode ? "true" : "false")
+
+        // In LOCAL_MODE, skip Firebase entirely — use stored UserDefaults tokens only
+        if isLocalMode {
+            NSLog("OMI AUTH: LOCAL_MODE enabled — restoring auth from UserDefaults only")
+            if savedSignedIn {
+                self.isSignedIn = true
+                AuthState.shared.userEmail = savedEmail
+                AuthState.shared.isRestoringAuth = false
+            } else {
+                NSLog("OMI AUTH: No saved auth state found (LOCAL_MODE)")
+                AuthState.shared.isRestoringAuth = false
+            }
+            return
+        }
 
         // Set auth state synchronously (we're already on main thread from configure()).
         // Using DispatchQueue.main.async here would defer to the next run-loop tick,
@@ -199,6 +221,12 @@ class AuthService {
     // MARK: - Auth State Listener
 
     private func setupAuthStateListener() {
+        // In LOCAL_MODE, skip Firebase auth state listener entirely
+        if isLocalMode {
+            NSLog("OMI AUTH: LOCAL_MODE enabled — skipping Firebase auth state listener")
+            return
+        }
+
         authStateHandle = Auth.auth().addStateDidChangeListener { [weak self] _, user in
             Task { @MainActor in
                 if user != nil {
