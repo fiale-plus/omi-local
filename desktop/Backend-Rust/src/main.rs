@@ -111,7 +111,7 @@ async fn main() {
     let auth_project_id = config.firebase_auth_project_id.clone()
         .or_else(|| config.firebase_project_id.clone())
         .expect("FIREBASE_AUTH_PROJECT_ID or FIREBASE_PROJECT_ID must be set");
-    let firebase_auth = Arc::new(FirebaseAuth::new(auth_project_id));
+    let firebase_auth = Arc::new(FirebaseAuth::new(auth_project_id, config.local_mode));
 
     // Refresh Firebase keys with retry (transient network failures at startup)
     {
@@ -265,7 +265,11 @@ async fn main() {
         .layer(TraceLayer::new_for_http());
 
     // Start server
-    let addr = format!("0.0.0.0:{}", config.port);
+    let addr = if config.bind_localhost {
+        format!("127.0.0.1:{}", config.port)
+    } else {
+        format!("0.0.0.0:{}", config.port)
+    };
     tracing::info!("Starting OMI Desktop Backend on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();

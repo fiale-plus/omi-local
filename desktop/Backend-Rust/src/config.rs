@@ -73,10 +73,12 @@ pub struct Config {
     pub elevenlabs_api_key: Option<String>,
     /// Google Calendar API key (served to desktop clients)
     pub google_calendar_api_key: Option<String>,
-    /// Enable local-first offline mode (bypasses Firestore, uses SQLite)
+    /// Local development / local-first mode (bypasses Firebase auth with dev user, uses SQLite)
     pub local_mode: bool,
     /// Path for the local SQLite database (default: ./omi_local.db)
     pub local_db_path: Option<String>,
+    /// Bind to localhost only (for development)
+    pub bind_localhost: bool,
 }
 
 impl Config {
@@ -140,11 +142,18 @@ impl Config {
             google_calendar_api_key: env::var("GOOGLE_CALENDAR_API_KEY").ok(),
             local_mode: env::var("LOCAL_MODE").ok().map(|v| v == "1" || v.to_lowercase() == "true").unwrap_or(false),
             local_db_path: env::var("LOCAL_DB_PATH").ok(),
+            bind_localhost: env::var("BIND_LOCALHOST").ok().map(|v| v == "true" || v == "1").unwrap_or(false),
         }
     }
 
     /// Validate that required configuration is present
     pub fn validate(&self) -> Result<(), String> {
+        if self.local_mode {
+            tracing::warn!("LOCAL_MODE enabled - using development auth bypass (DO NOT USE IN PRODUCTION)");
+        }
+        if self.bind_localhost {
+            tracing::info!("BIND_LOCALHOST enabled - server will listen on 127.0.0.1 only");
+        }
         if self.gemini_api_key.is_none() {
             tracing::warn!("GEMINI_API_KEY not set - conversation processing will fail");
         }
