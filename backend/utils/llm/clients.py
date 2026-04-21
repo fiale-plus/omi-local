@@ -19,8 +19,76 @@ logger = logging.getLogger(__name__)
 _usage_callback = get_usage_callback()
 
 # ---------------------------------------------------------------------------
-# BYOK routing proxies
+# LOCAL_MODE — OpenAI-compatible local gateway
 #
+# When LOCAL_MODE=1 the entire stack runs without cloud credentials.
+# LOCAL_LLM_BASE_URL should point to an OpenAI-compatible local server
+# (e.g. Ollama at localhost:11434, or a self-hosted text-generation-webui).
+# If not set, falls back to no-LLM mode (basic context only, no extraction).
+# ---------------------------------------------------------------------------
+
+_LOCAL_LLM_BASE_URL: Optional[str] = None
+_LOCAL_LLM_MODEL: Optional[str] = None
+_LOCAL_LLM_API_KEY: Optional[str] = None
+_LOCAL_LLM_ENABLED: bool = False
+
+def _init_local_llm():
+    global _LOCAL_LLM_BASE_URL, _LOCAL_LLM_MODEL, _LOCAL_LLM_API_KEY, _LOCAL_LLM_ENABLED
+    if os.getenv("LOCAL_MODE", "").lower() in ("1", "true", "yes"):
+        _LOCAL_LLM_BASE_URL = os.environ.get("LOCAL_LLM_BASE_URL", "").strip() or None
+        _LOCAL_LLM_MODEL = os.environ.get("LOCAL_LLM_MODEL", "").strip() or None
+        _LOCAL_LLM_API_KEY = os.environ.get("LOCAL_LLM_API_KEY", "").strip() or None
+        _LOCAL_LLM_ENABLED = bool(_LOCAL_LLM_BASE_URL and _LOCAL_LLM_MODEL)
+        if _LOCAL_LLM_ENABLED:
+            logger.info(
+                "LOCAL_MODE LLM: base_url=%s model=%s",
+                _LOCAL_LLM_BASE_URL,
+                _LOCAL_LLM_MODEL,
+            )
+        else:
+            logger.warning(
+                "LOCAL_MODE=1 but LOCAL_LLM_BASE_URL / LOCAL_LLM_MODEL not set — "
+                "LLM extraction will be skipped"
+            )
+
+_init_local_llm()
+
+
+def is_local_llm_enabled() -> bool:
+    """True when LOCAL_MODE=1 and a local LLM gateway is configured."""
+    return _LOCAL_LLM_ENABLED
+
+
+def get_local_llm_config() -> tuple[str, str, Optional[str]]:
+    """Return (base_url, model, api_key) for the local LLM gateway."""
+    return (_LOCAL_LLM_BASE_URL or "", _LOCAL_LLM_MODEL or "", _LOCAL_LLM_API_KEY)
+
+
+def get_local_llm(feature: str) -> Optional[ChatOpenAI]:
+    """Get a ChatOpenAI client for LOCAL_MODE pointing at the local gateway.
+
+    Returns None when LOCAL_MODE is not active or not configured.
+    The returned client is cached per (model, streaming) to avoid reconnection overhead.
+    """
+    if not _LOCAL_LLM_ENABLED:
+        return None
+
+    model = get_model(feature)
+    # In LOCAL_MODE the model name is passed as-is to the local gateway
+    # (the user specifies which model name their gateway serves).
+    key = (model, False, 'local')
+    if key not in _llm_cache:
+        kwargs: Dict[str, Any] = {
+            'model': model,
+            'base_url': _LOCAL_LLM_BASE_URL,
+            'api_key': _LOCAL_LLM_API_KEY or 'local',
+        }
+        _llm_cache[key] = ChatOpenAI(**kwargs)
+    return _llm_cache[key]
+
+
+# ---------------------------------------------------------------------------
+# BYOK routing proxies
 # The backend has ~50 call sites that use module-level `llm_medium`, `llm_mini`,
 # etc. directly (e.g. `llm_medium.invoke(prompt)` or `llm_medium.bind_tools(...).ainvoke(...)`).
 # Rewriting every site to go through a factory would be a massive sweep.
@@ -435,6 +503,9 @@ def get_llm(feature: str, streaming: bool = False, cache_key: Optional[str] = No
     Works for OpenAI and OpenRouter features (returns ChatOpenAI or BYOK proxy).
     For Anthropic/Perplexity, use get_model(feature) to get the model string.
 
+    In LOCAL_MODE, routes to the OpenAI-compatible local gateway if configured,
+    falling back to a no-op client if not.
+
     Args:
         feature: Feature name (e.g. 'conv_action_items', 'persona_chat').
         streaming: Whether to return a streaming-enabled client.
@@ -447,6 +518,26 @@ def get_llm(feature: str, streaming: bool = False, cache_key: Optional[str] = No
         llm_stream = get_llm('chat_responses', streaming=True)
         response = llm_stream.invoke(prompt, {'callbacks': callbacks})
     """
+    # LOCAL_MODE: use local gateway if configured, otherwise return a no-op
+    if _LOCAL_LLM_ENABLED:
+        local_llm = get_local_llm(feature)
+        if local_llm is not None:
+            if streaming:
+                # Return a new streaming-capable instance for this feature
+                model = get_model(feature)
+                key = (model, True, 'local')
+                if key not in _llm_cache:
+                    kwargs: Dict[str, Any] = {
+                        'model': model,
+                        'base_url': _LOCAL_LLM_BASE_URL,
+                        'api_key': _LOCAL_LLM_API_KEY or 'local',
+                        'streaming': True,
+                        'stream_options': {"include_usage": True},
+                    }
+                    _llm_cache[key] = ChatOpenAI(**kwargs)
+                return _llm_cache[key]
+            return local_llm
+
     if feature in _ANTHROPIC_ONLY_FEATURES:
         raise ValueError(
             f"Feature '{feature}' is Anthropic — use get_model('{feature}') with anthropic_client instead of get_llm()"

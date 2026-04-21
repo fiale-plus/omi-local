@@ -22,6 +22,31 @@ use crate::services::FirestoreService;
 use crate::AppState;
 
 // ============================================================================
+// LLM CLIENT FACTORY
+// ============================================================================
+
+/// Build an `LlmClient` from app state, routing to local gateway if LOCAL_MODE
+/// LLM is configured, otherwise falling back to Gemini with the configured key.
+fn make_llm(state: &AppState, api_key: String) -> LlmClient {
+    if state.config.local_mode
+        && state.config.local_llm_base_url.is_some()
+        && state.config.local_llm_model.is_some()
+    {
+        LlmClient::new_local(
+            state.config.local_llm_base_url.as_ref().unwrap().clone(),
+            state.config.local_llm_model.as_ref().unwrap().clone(),
+            state.config.local_llm_api_key.clone().unwrap_or_else(|| "local".to_string()),
+        )
+    } else {
+        LlmClient::new(
+            api_key,
+            state.config.local_llm_base_url.clone(),
+            state.config.local_llm_model.clone(),
+        )
+    }
+}
+
+// ============================================================================
 // REQUEST/RESPONSE MODELS
 // ============================================================================
 
@@ -258,7 +283,7 @@ async fn get_chat_context(
         }
     };
 
-    let llm = LlmClient::new(api_key);
+    let llm = make_llm(&state, api_key);
 
     // Format conversation history for context-aware decisions
     let user_name = user.name.as_deref().unwrap_or("User");
@@ -378,7 +403,7 @@ async fn generate_initial_message(
         }
     };
 
-    let llm = LlmClient::new(api_key);
+    let llm = make_llm(&state, api_key);
 
     // Fetch user memories (top 10)
     let memories: Vec<String> = match state.firestore.get_memories(&user.uid, 10).await {
@@ -488,7 +513,7 @@ async fn generate_session_title(
         }
     };
 
-    let llm = LlmClient::new(api_key);
+    let llm = make_llm(&state, api_key);
 
     // Convert messages to the format expected by the LLM
     let messages: Vec<(String, String)> = request
