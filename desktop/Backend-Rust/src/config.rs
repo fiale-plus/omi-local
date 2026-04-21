@@ -73,6 +73,10 @@ pub struct Config {
     pub elevenlabs_api_key: Option<String>,
     /// Google Calendar API key (served to desktop clients)
     pub google_calendar_api_key: Option<String>,
+    /// Enable local-first offline mode (bypasses Firestore, uses SQLite)
+    pub local_mode: bool,
+    /// Path for the local SQLite database (default: ./omi_local.db)
+    pub local_db_path: Option<String>,
 }
 
 impl Config {
@@ -134,6 +138,8 @@ impl Config {
             anthropic_api_key: env::var("ANTHROPIC_API_KEY").ok(),
             elevenlabs_api_key: env::var("ELEVENLABS_API_KEY").ok(),
             google_calendar_api_key: env::var("GOOGLE_CALENDAR_API_KEY").ok(),
+            local_mode: env::var("LOCAL_MODE").ok().map(|v| v == "1" || v.to_lowercase() == "true").unwrap_or(false),
+            local_db_path: env::var("LOCAL_DB_PATH").ok(),
         }
     }
 
@@ -147,6 +153,9 @@ impl Config {
         }
         if self.encryption_secret.is_none() {
             tracing::warn!("ENCRYPTION_SECRET not set — encrypted user data will not be decryptable");
+        }
+        if self.local_mode {
+            tracing::info!("LOCAL_MODE enabled — using SQLite backend, bypassing Firestore");
         }
         Ok(())
     }
