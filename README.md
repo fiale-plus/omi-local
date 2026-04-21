@@ -29,6 +29,45 @@ Builds the macOS app, connects to the cloud backend, and launches. No env files,
 
 > **Requirements:** macOS 14+, [Xcode](https://developer.apple.com/xcode/) (includes Swift & code signing), [Node.js](https://nodejs.org/)
 
+---
+
+### 🖥️ Local Mode — Fully Offline, No Account
+
+Run Omi entirely on your Mac — no Firebase, no cloud services, no account required.
+
+**Prerequisites:**
+- [Ollama](https://ollama.com) installed and running (`brew install ollama && ollama serve`)
+- A model downloaded: `ollama pull llama3` (or any model you prefer)
+
+**One-command start:**
+```bash
+cd desktop && ./run-local.sh
+```
+
+That's it. The script will:
+- Start the Rust backend on port 10201 (LOCAL_MODE=1)
+- Start the Python backend on port 8080 (LOCAL_MODE=1)
+- Skip Firebase auth, Firestore, GCS, Deepgram, and Pinecone entirely
+- Route all AI through your local Ollama instance
+
+**Smoke test:**
+```bash
+curl http://127.0.0.1:10201/v4/local/status
+```
+
+**Configure the local LLM** — edit `desktop/Backend-Rust/.env.local`:
+```bash
+LOCAL_LLM_BASE_URL=http://localhost:11434/v1   # your Ollama endpoint
+LOCAL_LLM_MODEL=llama3                         # your model name
+```
+
+**Stop services:**
+```bash
+./run-local.sh --stop
+```
+
+For troubleshooting, see `desktop/Desktop/Sources/LocalDiagnosticsView.swift` (built into the app's Settings → Troubleshooting panel when running in local mode).
+
 <details>
   <summary>Full Installation</summary>
   
