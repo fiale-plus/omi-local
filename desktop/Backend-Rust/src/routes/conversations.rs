@@ -34,7 +34,7 @@ fn make_llm(state: &AppState, api_key: String) -> Result<LlmClient, (StatusCode,
             .unwrap_or_else(|| "local".to_string());
         Ok(LlmClient::new_local(base_url, model, local_key))
     } else {
-        Ok(LlmClient::new(api_key).with_model(
+        Ok(LlmClient::new(api_key, None, None).with_model(
             crate::llm::model_qos::gemini_extraction(),
         ))
     }

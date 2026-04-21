@@ -1283,20 +1283,20 @@ mod tests {
 
     #[test]
     fn new_uses_qos_default_model() {
-        let client = LlmClient::new("test-key".to_string());
+        let client = LlmClient::new("test-key".to_string(), None, None);
         assert_eq!(client.model, super::super::model_qos::gemini_default());
     }
 
     #[test]
     fn with_model_overrides_default() {
-        let client = LlmClient::new("test-key".to_string())
+        let client = LlmClient::new("test-key".to_string(), None, None)
             .with_model("gemini-pro-latest");
         assert_eq!(client.model, "gemini-pro-latest");
     }
 
     #[test]
     fn with_model_extraction_uses_extraction_accessor() {
-        let client = LlmClient::new("test-key".to_string())
+        let client = LlmClient::new("test-key".to_string(), None, None)
             .with_model(super::super::model_qos::gemini_extraction());
         // In test env (premium tier), extraction == default == flash
         assert_eq!(client.model, "gemini-3-flash-preview");
