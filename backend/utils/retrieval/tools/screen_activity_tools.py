@@ -3,6 +3,7 @@ Tools for accessing screen/computer activity data from the desktop app.
 """
 
 import contextvars
+import os
 from datetime import datetime
 from typing import Optional
 
@@ -16,6 +17,8 @@ from utils.llm.clients import gemini_embed_query
 import logging
 
 logger = logging.getLogger(__name__)
+
+_LOCAL_MODE = os.getenv("LOCAL_MODE", "").lower() in ("1", "true", "yes")
 
 try:
     from utils.retrieval.agentic import agent_config_context
@@ -177,7 +180,12 @@ def search_screen_activity_tool(
             pass
 
     try:
-        query_vector = gemini_embed_query(query)
+        # In LOCAL_MODE, skip Gemini embedding and use the raw query string directly
+        # vector_db.search_screen_activity_vectors handles LOCAL_MODE and will use FTS
+        if _LOCAL_MODE:
+            query_vector = query  # pass raw query string; LOCAL_MODE FTS path uses it as keywords
+        else:
+            query_vector = gemini_embed_query(query)
     except Exception as e:
         logger.error(f"search_screen_activity_tool - embedding error: {e}")
         return f"Error generating search embedding: {e}"
