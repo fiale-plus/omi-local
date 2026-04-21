@@ -214,6 +214,11 @@ struct SettingsContentView: View {
   @State private var privateCloudSyncEnabled: Bool = true
   @State private var isTrackingExpanded: Bool = false
 
+  // Local mode flag — reflects current LOCAL_MODE environment variable state
+  private var isLocalMode: Bool {
+    ProcessInfo.processInfo.environment["LOCAL_MODE"] == "1"
+  }
+
   // Transcription settings (from backend)
   @State private var singleLanguageMode: Bool = false
   @State private var newVocabularyWord: String = ""
@@ -1502,13 +1507,16 @@ struct SettingsContentView: View {
 
           Divider()
 
-          privacyToggleRow(
-            icon: "cloud.fill",
-            title: "Private Cloud Sync",
-            subtitle: "Sync your data securely to your private cloud storage",
-            isOn: $privateCloudSyncEnabled
-          ) { newValue in
-            updatePrivateCloudSync(newValue)
+          // Hide cloud sync toggle in LOCAL_MODE — it requires cloud backend
+          if !isLocalMode {
+            privacyToggleRow(
+              icon: "cloud.fill",
+              title: "Private Cloud Sync",
+              subtitle: "Sync your data securely to your private cloud storage",
+              isOn: $privateCloudSyncEnabled
+            ) { newValue in
+              updatePrivateCloudSync(newValue)
+            }
           }
         }
       }
@@ -1546,7 +1554,11 @@ struct SettingsContentView: View {
               .cornerRadius(3)
           }
 
-          Text("Your data is encrypted and stored securely with Google Cloud infrastructure.")
+          Text(
+            isLocalMode
+              ? "Your data is encrypted and stored locally on this Mac."
+              : "Your data is encrypted and stored securely with Google Cloud infrastructure."
+          )
             .scaledFont(size: 12)
             .foregroundColor(OmiColors.textTertiary)
         }
@@ -1745,7 +1757,123 @@ struct SettingsContentView: View {
 
   // MARK: - Plan and Usage Section
 
+  @ViewBuilder
   private var planUsageSection: some View {
+    if isLocalMode {
+      localPlanUsageSection
+    } else {
+      cloudPlanUsageSection
+    }
+  }
+
+  // LOCAL_MODE: show simplified local storage info instead of subscription billing
+  private var localPlanUsageSection: some View {
+    VStack(spacing: 20) {
+      // Local mode status card
+      settingsCard(settingId: "planusage.local.status") {
+        VStack(alignment: .leading, spacing: 14) {
+          HStack(spacing: 16) {
+            Image(systemName: "checkmark.circle.fill")
+              .scaledFont(size: 28)
+              .foregroundColor(OmiColors.success)
+
+            VStack(alignment: .leading, spacing: 4) {
+              Text("Local Mode Active")
+                .scaledFont(size: 16, weight: .semibold)
+                .foregroundColor(OmiColors.textPrimary)
+
+              Text("No subscription required — all features available")
+                .scaledFont(size: 13)
+                .foregroundColor(OmiColors.textTertiary)
+            }
+
+            Spacer()
+          }
+
+          Divider()
+            .overlay(OmiColors.backgroundQuaternary)
+
+          HStack(spacing: 10) {
+            Image(systemName: "lock.shield.fill")
+              .scaledFont(size: 12)
+              .foregroundColor(OmiColors.success)
+
+            Text("All features unlocked. Data stored locally on this Mac.")
+              .scaledFont(size: 12)
+              .foregroundColor(OmiColors.textSecondary)
+
+            Spacer()
+          }
+        }
+      }
+
+      // Local storage info (replaces chat usage in local mode)
+      localStorageUsageCard
+
+      // BYOK card still available in local mode
+      byokPromoCard
+    }
+  }
+
+  private var localStorageUsageCard: some View {
+    settingsCard(settingId: "planusage.local.storage") {
+      VStack(alignment: .leading, spacing: 12) {
+        HStack {
+          Text("Storage")
+            .scaledFont(size: 14, weight: .semibold)
+            .foregroundColor(OmiColors.textPrimary)
+
+          Spacer()
+
+          Text(localStorageUsedText)
+            .scaledFont(size: 13)
+            .foregroundColor(OmiColors.textTertiary)
+        }
+
+        ProgressView(value: localStoragePercent / 100.0)
+          .progressViewStyle(LinearProgressViewStyle(tint: OmiColors.purplePrimary))
+          .frame(height: 6)
+
+        Text("Used of \(localStorageTotalText). Data stays on this Mac.")
+          .scaledFont(size: 12)
+          .foregroundColor(OmiColors.textTertiary)
+      }
+    }
+  }
+
+  private var localStorageUsedText: String {
+    let fm = FileManager.default
+    guard let attrs = try? fm.attributesOfFileSystem(forPath: NSHomeDirectory()),
+          let total = attrs[.systemSize] as? Int64,
+          let free = attrs[.systemFreeSize] as? Int64 else {
+      return "Unknown"
+    }
+    let used = total - free
+    return ByteCountFormatter.string(fromBytes: used, countStyle: .file)
+  }
+
+  private var localStorageTotalText: String {
+    let fm = FileManager.default
+    guard let attrs = try? fm.attributesOfFileSystem(forPath: NSHomeDirectory()),
+          let total = attrs[.systemSize] as? Int64 else {
+      return "Unknown"
+    }
+    return ByteCountFormatter.string(fromBytes: total, countStyle: .file)
+  }
+
+  private var localStoragePercent: Double {
+    let fm = FileManager.default
+    guard let attrs = try? fm.attributesOfFileSystem(forPath: NSHomeDirectory()),
+          let total = attrs[.systemSize] as? Int64,
+          let free = attrs[.systemFreeSize] as? Int64 else {
+      return 0
+    }
+    let used = total - free
+    return min(Double(used) / Double(total) * 100, 100)
+  }
+
+  // Cloud mode: full subscription/billing flow
+  private var cloudPlanUsageSection: some View {
     VStack(spacing: 20) {
       settingsCard(settingId: "planusage.current") {
         VStack(alignment: .leading, spacing: 14) {
@@ -2945,6 +3073,11 @@ struct SettingsContentView: View {
       preferencesSubsection
       advancedCategoryHeader(title: "Troubleshooting", icon: "wrench.and.screwdriver")
       troubleshootingSubsection
+      // LOCAL_MODE: add local diagnostics to troubleshooting
+      if isLocalMode {
+        advancedCategoryHeader(title: "Local Diagnostics", icon: "stethoscope")
+        localDiagnosticsSection
+      }
       advancedCategoryHeader(title: "Developer API Keys", icon: "key")
       developerKeysSubsection
 
@@ -4716,6 +4849,12 @@ struct SettingsContentView: View {
       }
 
     }
+  }
+
+  // MARK: - Local Diagnostics Section (LOCAL_MODE only)
+
+  private var localDiagnosticsSection: some View {
+    LocalDiagnosticsView(appState: appState)
   }
 
   // MARK: - Reset Onboarding Subsection
