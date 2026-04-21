@@ -27,6 +27,7 @@ mod config;
 mod encryption;
 mod llm;
 mod models;
+mod repository;
 mod routes;
 mod services;
 

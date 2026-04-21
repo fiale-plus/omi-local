@@ -61,3 +61,8 @@ redis = { version = "0.25", features = ["tokio-comp", "connection-manager"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 
 # Note: Using Firestore REST API directly instead of gcloud-sdk for compatibility
+
+# Repository / SQLite storage
+rusqlite = { version = "0.31", features = ["bundled"] }
+async-trait = "0.1"
+dirs = "5"
