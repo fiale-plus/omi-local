@@ -11,11 +11,31 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-if os.getenv('PINECONE_API_KEY') is not None:
+# -----------------------------------------------------------------------------
+# LOCAL_MODE — no Pinecone; use SQLite FTS5 instead
+# -----------------------------------------------------------------------------
+_LOCAL_MODE = os.getenv("LOCAL_MODE", "").lower() in ("1", "true", "yes")
+
+if not _LOCAL_MODE and os.getenv('PINECONE_API_KEY') is not None:
     pc = Pinecone(api_key=os.getenv('PINECONE_API_KEY', ''))
     index = pc.Index(os.getenv('PINECONE_INDEX_NAME', ''))
 else:
     index = None
+
+# Lazy import to avoid hard dependency when not in LOCAL_MODE
+_local_fts = None
+
+
+def _get_local_fts():
+    global _local_fts
+    if _local_fts is None:
+        try:
+            from database import local_fts as _mod
+            _local_fts = _mod
+        except Exception as e:
+            logger.warning(f"local_fts unavailable: {e}")
+            _local_fts = None
+    return _local_fts
 
 
 def _get_data(uid: str, conversation_id: str, vector: List[float]):
@@ -31,11 +51,17 @@ def _get_data(uid: str, conversation_id: str, vector: List[float]):
 
 
 def upsert_vector(uid: str, conversation_id: str, vector: List[float]):
+    if _LOCAL_MODE:
+        logger.debug("LOCAL_MODE: upsert_vector skipped (Pinecone unavailable)")
+        return
     res = index.upsert(vectors=[_get_data(uid, conversation_id, vector)], namespace="ns1")
     logger.info(f'upsert_vector {res}')
 
 
 def upsert_vector2(uid: str, conversation_id: str, vector: List[float], metadata: dict):
+    if _LOCAL_MODE:
+        logger.debug("LOCAL_MODE: upsert_vector2 skipped (Pinecone unavailable)")
+        return
     data = _get_data(uid, conversation_id, vector)
     data['metadata'].update(metadata)
     res = index.upsert(vectors=[data], namespace="ns1")
@@ -43,18 +69,33 @@ def upsert_vector2(uid: str, conversation_id: str, vector: List[float], metadata
 
 
 def update_vector_metadata(uid: str, conversation_id: str, metadata: dict):
+    if _LOCAL_MODE:
+        logger.debug("LOCAL_MODE: update_vector_metadata skipped")
+        return
     metadata['uid'] = uid
     metadata['memory_id'] = conversation_id
     return index.update(f'{uid}-{conversation_id}', set_metadata=metadata, namespace="ns1")
 
 
 def upsert_vectors(uid: str, vectors: List[List[float]], conversation_ids: List[str]):
+    if _LOCAL_MODE:
+        logger.debug("LOCAL_MODE: upsert_vectors skipped")
+        return
     data = [_get_data(uid, cid, vector) for cid, vector in zip(conversation_ids, vectors)]
     res = index.upsert(vectors=data, namespace="ns1")
     logger.info(f'upsert_vectors {res}')
 
 
 def query_vectors(query: str, uid: str, starts_at: int = None, ends_at: int = None, k: int = 5) -> List[str]:
+    # LOCAL_MODE: fall back to lexical search
+    if _LOCAL_MODE:
+        fts = _get_local_fts()
+        if fts is not None:
+            ids = fts.search_conversations_fts(uid, query, limit=k)
+            if ids:
+                return ids
+        logger.debug("LOCAL_MODE: query_vectors no FTS results")
+        return []
     filter_data = {'uid': uid}
     if starts_at is not None:
         filter_data['created_at'] = {'$gte': starts_at, '$lte': ends_at}
@@ -74,6 +115,10 @@ def query_vectors_by_metadata(
     dates: List[str],
     limit: int = 5,
 ):
+    # LOCAL_MODE: not yet supported (structured metadata filtering)
+    if _LOCAL_MODE:
+        logger.debug("LOCAL_MODE: query_vectors_by_metadata not supported")
+        return []
     filter_data = {
         '$and': [
             {'uid': {'$eq': uid}},
@@ -139,6 +184,9 @@ def delete_vector(uid: str, conversation_id: str):
 
     Note: Vectors are stored with ID format '{uid}-{conversation_id}'
     """
+    if _LOCAL_MODE:
+        logger.debug("LOCAL_MODE: delete_vector skipped")
+        return
     vector_id = f'{uid}-{conversation_id}'
     result = index.delete(ids=[vector_id], namespace="ns1")
     logger.info(f'delete_vector {vector_id} {result}')
@@ -155,7 +203,15 @@ MEMORIES_NAMESPACE = "ns2"
 def upsert_memory_vector(uid: str, memory_id: str, content: str, category: str):
     """
     Upsert a memory embedding to Pinecone.
+    In LOCAL_MODE: write to SQLite FTS5 as a fallback.
     """
+    # LOCAL_MODE: index in SQLite FTS5
+    if _LOCAL_MODE:
+        fts = _get_local_fts()
+        if fts is not None:
+            fts.upsert_memory_fts(uid, memory_id, content, category)
+        return None
+
     if index is None:
         logger.warning('Pinecone index not initialized, skipping memory vector upsert')
         return None
@@ -184,7 +240,19 @@ def upsert_memory_vectors_batch(uid: str, items: List[dict]) -> int:
     Batching cuts latency from N embedding calls + N upserts to one embedding
     call + one upsert. Used by POST /v3/memories/batch and the dev batch API.
     Returns the number of vectors written (0 if Pinecone is not configured).
+
+    In LOCAL_MODE: writes to SQLite FTS5 instead.
     """
+    if _LOCAL_MODE:
+        fts = _get_local_fts()
+        if fts is None:
+            return 0
+        count = 0
+        for item in items:
+            if fts.upsert_memory_fts(uid, item['memory_id'], item['content'], item['category']):
+                count += 1
+        return count
+
     if index is None:
         logger.warning('Pinecone index not initialized, skipping memory vector batch upsert')
         return 0
@@ -219,7 +287,18 @@ def find_similar_memories(uid: str, content: str, threshold: float = 0.85, limit
     Find memories similar to the given content.
     Returns list of matches with similarity scores.
     Used for duplicate detection and semantic search.
+
+    In LOCAL_MODE: falls back to SQLite FTS5 lexical search.
     """
+    # LOCAL_MODE: lexical fallback
+    if _LOCAL_MODE:
+        fts = _get_local_fts()
+        if fts is not None:
+            ids = fts.search_memories_fts(uid, content, limit=limit)
+            # FTS doesn't return scores; return dummy score to pass threshold
+            return [{"memory_id": mid, "category": "", "score": 1.0} for mid in ids]
+        return []
+
     if index is None:
         logger.warning('Pinecone index not initialized, skipping similarity search')
         return []
@@ -261,7 +340,15 @@ def search_memories_by_vector(uid: str, query: str, limit: int = 10) -> List[str
     """
     Semantic search for memories.
     Returns list of memory_ids ordered by relevance.
+
+    In LOCAL_MODE: falls back to SQLite FTS5 lexical search.
     """
+    if _LOCAL_MODE:
+        fts = _get_local_fts()
+        if fts is not None:
+            return fts.search_memories_fts(uid, query, limit=limit)
+        return []
+
     if index is None:
         logger.warning('Pinecone index not initialized, skipping memory search')
         return []
@@ -279,7 +366,14 @@ def search_memories_by_vector(uid: str, query: str, limit: int = 10) -> List[str
 def delete_memory_vector(uid: str, memory_id: str):
     """
     Delete a memory vector from Pinecone.
+    In LOCAL_MODE: also removes from SQLite FTS5.
     """
+    if _LOCAL_MODE:
+        fts = _get_local_fts()
+        if fts is not None:
+            fts.delete_memory_fts(memory_id)
+        return
+
     if index is None:
         logger.warning('Pinecone index not initialized, skipping memory vector delete')
         return
@@ -298,7 +392,30 @@ SCREEN_ACTIVITY_NAMESPACE = "ns3"
 
 
 def upsert_screen_activity_vectors(uid: str, rows: List[dict]) -> int:
-    """Batch upsert screenshot embeddings to Pinecone ns3."""
+    """Batch upsert screenshot embeddings to Pinecone ns3.
+
+    In LOCAL_MODE: writes OCR text to SQLite FTS5 instead.
+    """
+    # LOCAL_MODE: index OCR text in SQLite FTS5
+    if _LOCAL_MODE:
+        fts = _get_local_fts()
+        if fts is None:
+            return 0
+        count = 0
+        for row in rows:
+            ts = row.get('timestamp', '')
+            if fts.upsert_screen_activity_fts(
+                uid=uid,
+                screenshot_id=str(row.get('id', '')),
+                ocr_text=row.get('ocrText', '') or '',
+                app_name=row.get('appName', ''),
+                window_title=row.get('windowTitle', ''),
+                timestamp=ts,
+            ):
+                count += 1
+        logger.info(f'upsert_screen_activity_vectors LOCAL_MODE count={count}')
+        return count
+
     if index is None:
         logger.warning('Pinecone index not initialized, skipping screen activity vector upsert')
         return 0
@@ -347,7 +464,28 @@ def search_screen_activity_vectors(
     app_filter: str = None,
     k: int = 10,
 ) -> List[dict]:
-    """Vector search across screenshot embeddings in ns3."""
+    """Vector search across screenshot embeddings in ns3.
+
+    In LOCAL_MODE: falls back to SQLite FTS5 lexical search on OCR text.
+    Note: query_vector is ignored in LOCAL_MODE — we search by keyword instead.
+    """
+    # LOCAL_MODE: lexical fallback using OCR text FTS
+    if _LOCAL_MODE:
+        fts = _get_local_fts()
+        if fts is None:
+            return []
+        start_str = str(start_date) if start_date else None
+        end_str = str(end_date) if end_date else None
+        results = fts.search_screen_activity_fts(
+            uid=uid,
+            query=str(query_vector) if not isinstance(query_vector, str) else query_vector,
+            start_date=start_str,
+            end_date=end_str,
+            app_filter=app_filter,
+            limit=k,
+        )
+        return results
+
     if index is None:
         logger.warning('Pinecone index not initialized, skipping screen activity search')
         return []

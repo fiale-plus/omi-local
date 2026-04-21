@@ -1,6 +1,7 @@
 // Screen Activity sync route
-// Receives screenshot metadata + embeddings from the desktop app,
-// writes metadata to Firestore and embeddings to Pinecone ns3.
+// Receives screenshot metadata + embeddings from the desktop app.
+// In LOCAL_MODE: writes to local SQLite.
+// In cloud mode: writes metadata to Firestore and embeddings to Pinecone ns3.
 
 use axum::{
     extract::State,
@@ -36,7 +37,31 @@ async fn sync_screen_activity(
         last_id
     );
 
-    // Write metadata to Firestore
+    // LOCAL_MODE: write to local SQLite instead of Firestore
+    if state.config.local_mode {
+        if let Some(local_db) = &state.local_db {
+            match local_db.upsert_screen_activity(&user.uid, &request.rows).await {
+                Ok(written) => {
+                    tracing::info!("Screen activity LOCAL_MODE sync written={}", written);
+                    return Ok(Json(ScreenActivitySyncResponse { synced: written, last_id }));
+                }
+                Err(e) => {
+                    tracing::error!("Screen activity LOCAL_MODE write failed: {}", e);
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Local DB write failed: {}", e),
+                    ));
+                }
+            }
+        } else {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "LOCAL_MODE but local_db not initialized".to_string(),
+            ));
+        }
+    }
+
+    // Cloud mode: write metadata to Firestore
     let firestore_result = state
         .firestore
         .upsert_screen_activity(&user.uid, &request.rows)

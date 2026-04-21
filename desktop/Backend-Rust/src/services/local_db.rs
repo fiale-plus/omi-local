@@ -16,6 +16,7 @@ use crate::models::{
     Event, Folder, GoalDB, GoalsListResponse, Memory, MemoryDB, MessageDB, ScoreData,
     ScoreResponse,
 };
+use crate::models::screen_activity::ScreenActivityRow;
 
 /// Staged task row type (matches the staged_tasks table schema).
 /// Defined here since no separate staged_task.rs model exists.
@@ -175,6 +176,18 @@ impl LocalDb {
             CREATE INDEX IF NOT EXISTS idx_goals_user ON goals(user_id);
             CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id);
             CREATE INDEX IF NOT EXISTS idx_chat_sessions_user ON chat_sessions(user_id);
+
+            CREATE TABLE IF NOT EXISTS screen_activity (
+                id INTEGER PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                app_name TEXT NOT NULL DEFAULT '',
+                window_title TEXT NOT NULL DEFAULT '',
+                ocr_text TEXT NOT NULL DEFAULT '',
+                embedding BLOB
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_screen_activity_user ON screen_activity(user_id);
             "#,
         )
     }
@@ -860,5 +873,102 @@ impl LocalDb {
             params![format!("profile_{}", user_id), json],
         )?;
         Ok(())
+    }
+
+    // ── Screen Activity ─────────────────────────────────────────────────────
+
+    #[allow(dead_code)]
+    pub async fn upsert_screen_activity(
+        &self,
+        user_id: &str,
+        rows: &[crate::models::screen_activity::ScreenActivityRow],
+    ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+        let pool = self.pool.read().await;
+        let mut written = 0;
+        for row in rows {
+            let embedding_blob: Option<Vec<u8>> = row.embedding.as_ref().map(|v| {
+                // Serialize Vec<f64> as bytes for storage
+                let mut bytes = Vec::with_capacity(v.len() * 8);
+                for f in v {
+                    bytes.extend_from_slice(&f.to_le_bytes());
+                }
+                bytes
+            });
+            pool.execute(
+                r#"INSERT INTO screen_activity (id, user_id, timestamp, app_name, window_title, ocr_text, embedding)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET
+                       timestamp=excluded.timestamp,
+                       app_name=excluded.app_name,
+                       window_title=excluded.window_title,
+                       ocr_text=excluded.ocr_text,
+                       embedding=excluded.embedding"#,
+                params![
+                    row.id,
+                    user_id,
+                    row.timestamp,
+                    row.app_name,
+                    row.window_title,
+                    row.ocr_text,
+                    embedding_blob,
+                ],
+            )?;
+            written += 1;
+        }
+        Ok(written)
+    }
+
+    #[allow(dead_code)]
+    pub async fn get_screen_activity(
+        &self,
+        user_id: &str,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+        app_filter: Option<&str>,
+        limit: i32,
+    ) -> Result<Vec<crate::models::screen_activity::ScreenActivityRow>, Box<dyn std::error::Error + Send + Sync>> {
+        let pool = self.pool.read().await;
+        let mut sql = "SELECT id, timestamp, app_name, window_title, ocr_text, embedding FROM screen_activity WHERE user_id = ?".to_string();
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(user_id.to_string())];
+
+        if let Some(start) = start_date {
+            sql.push_str(" AND timestamp >= ?");
+            params_vec.push(Box::new(start.to_string()));
+        }
+        if let Some(end) = end_date {
+            sql.push_str(" AND timestamp <= ?");
+            params_vec.push(Box::new(end.to_string()));
+        }
+        if let Some(app) = app_filter {
+            sql.push_str(" AND app_name = ?");
+            params_vec.push(Box::new(app.to_string()));
+        }
+        sql.push_str(" ORDER BY timestamp ASC LIMIT ?");
+        params_vec.push(Box::new(limit));
+
+        let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = pool.prepare(&sql)?;
+        let rows = stmt.query_map(params_refs.as_slice(), |row| {
+            let embedding_bytes: Option<Vec<u8>> = row.get(5)?;
+            let embedding: Option<Vec<f64>> = embedding_bytes.map(|bytes| {
+                bytes
+                    .chunks_exact(8)
+                    .map(|chunk| f64::from_le_bytes(chunk.try_into().unwrap()))
+                    .collect()
+            });
+            Ok(crate::models::screen_activity::ScreenActivityRow {
+                id: row.get(0)?,
+                timestamp: row.get(1)?,
+                app_name: row.get(2)?,
+                window_title: row.get(3)?,
+                ocr_text: row.get(4)?,
+                embedding,
+            })
+        })?;
+        let mut result = Vec::new();
+        for r in rows {
+            result.push(r?);
+        }
+        Ok(result)
     }
 }
