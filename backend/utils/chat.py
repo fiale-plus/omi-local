@@ -25,6 +25,7 @@ from utils.stt.pre_recorded import (
     postprocess_words,
     get_deepgram_model_for_language,
 )
+from utils.stt.local_stt import is_local_stt_enabled, transcribe_pcm_with_local_stt, transcribe_wav_bytes_with_local_stt
 from utils.llm.usage_tracker import track_usage, set_usage_context, reset_usage_context, Features
 import logging
 
@@ -117,11 +118,27 @@ def transcribe_pcm_bytes(
     channels: int = 1,
     keywords: Optional[List[str]] = None,
 ) -> Tuple[Optional[str], Optional[str]]:
-    """Transcribe raw PCM audio bytes directly via Deepgram pre-recorded API.
+    """Transcribe raw PCM audio bytes via Deepgram or local faster-whisper.
 
     Skips GCS upload and WAV conversion for maximum speed.
     Used by desktop PTT batch mode.
+
+    In LOCAL_MODE, delegates to local faster-whisper instead of Deepgram.
     """
+    # Check for local STT mode first
+    if is_local_stt_enabled():
+        logger.info("Using local faster-whisper for PTT transcription (LOCAL_MODE)")
+        try:
+            return transcribe_pcm_with_local_stt(
+                audio_bytes,
+                language=language,
+                sample_rate=sample_rate,
+                channels=channels,
+            )
+        except Exception as e:
+            logger.error(f"Local STT failed, falling back to Deepgram: {e}")
+            # Fall through to Deepgram on failure
+
     if not language:
         language = resolve_voice_message_language(uid, None)
 
@@ -253,36 +270,61 @@ async def process_voice_message_segment_stream(
     uid: str,
     language: str = 'multi',
 ) -> AsyncGenerator[str, None]:
-    url = get_syncing_file_temporal_signed_url(path)
+    # Check for local STT mode first
+    if is_local_stt_enabled():
+        logger.info("Using local faster-whisper for voice message streaming (LOCAL_MODE)")
+        try:
+            # Read file bytes for local transcription
+            from utils.other.storage import get_file_bytes_from_path
+            file_bytes = get_file_bytes_from_path(path)
+            if file_bytes:
+                transcript, detected = transcribe_wav_bytes_with_local_stt(
+                    file_bytes,
+                    language=language,
+                )
+                del file_bytes
+                if transcript:
+                    text = transcript
+                else:
+                    logger.info('voice message text is empty')
+                    return
+            else:
+                logger.error("Failed to read file bytes for local STT")
+                return
+        except Exception as e:
+            logger.error(f"Local STT failed for voice message stream, falling back to Deepgram: {e}")
+            # Fall through to Deepgram on failure
+    else:
+        url = get_syncing_file_temporal_signed_url(path)
 
-    def delete_file():
-        time.sleep(480)
-        delete_syncing_temporal_file(path)
+        def delete_file():
+            time.sleep(480)
+            delete_syncing_temporal_file(path)
 
-    storage_executor.submit(delete_file)
+        storage_executor.submit(delete_file)
 
-    if not language:
-        language = resolve_voice_message_language(uid, None)
+        if not language:
+            language = resolve_voice_message_language(uid, None)
 
-    # Get the appropriate Deepgram model for this language
-    stt_language, stt_model = get_deepgram_model_for_language(language)
+        # Get the appropriate Deepgram model for this language
+        stt_language, stt_model = get_deepgram_model_for_language(language)
 
-    try:
-        words = deepgram_prerecorded(url, diarize=False, language=stt_language, model=stt_model)
-    except RuntimeError as e:
-        logger.error(f'Voice message transcription failed for {path}: {e}')
-        return
-    transcript_segments: List[TranscriptSegment] = postprocess_words(words, 0)
-    del words
-    if not transcript_segments:
-        logger.error('failed to get deepgram segments')
-        return
+        try:
+            words = deepgram_prerecorded(url, diarize=False, language=stt_language, model=stt_model)
+        except RuntimeError as e:
+            logger.error(f'Voice message transcription failed for {path}: {e}')
+            return
+        transcript_segments: List[TranscriptSegment] = postprocess_words(words, 0)
+        del words
+        if not transcript_segments:
+            logger.error('failed to get deepgram segments')
+            return
 
-    text = " ".join([segment.text for segment in transcript_segments]).strip()
-    transcript_segments.clear()
-    if len(text) == 0:
-        logger.info('voice message text is empty')
-        return
+        text = " ".join([segment.text for segment in transcript_segments]).strip()
+        transcript_segments.clear()
+        if len(text) == 0:
+            logger.info('voice message text is empty')
+            return
 
     # create message
     message = Message(

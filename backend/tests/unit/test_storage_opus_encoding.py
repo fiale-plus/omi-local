@@ -155,7 +155,7 @@ class TestUploadOpusEncoding:
 
     def test_opus_standard_extension(self, tmp_path):
         """Standard upload uses .opus extension."""
-        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path)):
+        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path / 'private-cloud-sync')):
             path = storage_mod.upload_audio_chunk(
                 chunk_data=b'\x00' * 640,
                 uid='test-uid',
@@ -169,7 +169,7 @@ class TestUploadOpusEncoding:
 
     def test_opus_enhanced_extension(self, tmp_path):
         """Enhanced upload uses .opus.enc extension."""
-        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path)):
+        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path / 'private-cloud-sync')):
             with patch.object(storage_mod, 'encryption') as mock_encryption:
                 mock_encryption.encrypt_audio_chunk.return_value = b'\x01' * 50
 
@@ -185,7 +185,7 @@ class TestUploadOpusEncoding:
 
     def test_opus_data_passed_to_encryption(self, tmp_path):
         """Encrypted upload passes Opus data (not raw PCM) to encryption."""
-        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path)):
+        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path / 'private-cloud-sync')):
             with patch.object(storage_mod, 'encryption') as mock_encryption:
                 mock_encryption.encrypt_audio_chunk.return_value = b'\x01' * 50
 
@@ -210,7 +210,7 @@ class TestListAudioChunksExtensions:
         """list_audio_chunks recognizes .bin, .enc, .opus, .opus.enc."""
         uid = 'test-uid'
         conv = 'test-conv'
-        base = tmp_path / 'chunks' / uid / conv
+        base = tmp_path / 'private-cloud-sync' / 'chunks' / uid / conv
         base.mkdir(parents=True)
 
         # Create test files
@@ -219,7 +219,7 @@ class TestListAudioChunksExtensions:
         (base / '1010.000.opus').write_bytes(b'\x00' * 8000)
         (base / '1015.000.opus.enc').write_bytes(b'\x00' * 8100)
 
-        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path)):
+        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path / 'private-cloud-sync')):
             chunks = storage_mod.list_audio_chunks(uid, conv)
 
         assert len(chunks) == 4
@@ -232,12 +232,12 @@ class TestListAudioChunksExtensions:
         """Double extension .opus.enc correctly extracts timestamp."""
         uid = 'test-uid'
         conv = 'test-conv'
-        base = tmp_path / 'chunks' / uid / conv
+        base = tmp_path / 'private-cloud-sync' / 'chunks' / uid / conv
         base.mkdir(parents=True)
 
         (base / '1234567890.123.opus.enc').write_bytes(b'\x00' * 8000)
 
-        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path)):
+        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path / 'private-cloud-sync')):
             chunks = storage_mod.list_audio_chunks(uid, conv)
 
         assert len(chunks) == 1
@@ -247,13 +247,13 @@ class TestListAudioChunksExtensions:
         """Unknown extensions are skipped."""
         uid = 'test-uid'
         conv = 'test-conv'
-        base = tmp_path / 'chunks' / uid / conv
+        base = tmp_path / 'private-cloud-sync' / 'chunks' / uid / conv
         base.mkdir(parents=True)
 
         (base / '1000.000.bin').write_bytes(b'\x00' * 160000)
         (base / '1005.000.txt').write_bytes(b'\x00' * 500)
 
-        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path)):
+        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path / 'private-cloud-sync')):
             chunks = storage_mod.list_audio_chunks(uid, conv)
 
         assert len(chunks) == 1
@@ -266,7 +266,7 @@ class TestDeleteAudioChunksExtensions:
         """delete_audio_chunks tries .enc, .bin, .opus.enc, .opus."""
         uid = 'test-uid'
         conv = 'test-conv'
-        base = tmp_path / 'chunks' / uid / conv
+        base = tmp_path / 'private-cloud-sync' / 'chunks' / uid / conv
         base.mkdir(parents=True)
 
         # Create files for all extensions
@@ -275,7 +275,7 @@ class TestDeleteAudioChunksExtensions:
         (base / '1000.000.opus.enc').write_bytes(b'\x00')
         (base / '1000.000.opus').write_bytes(b'\x00')
 
-        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path)):
+        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path / 'private-cloud-sync')):
             storage_mod.delete_audio_chunks(uid, conv, [1000.0])
 
         # All files should be deleted
@@ -292,14 +292,14 @@ class TestDownloadFallbackPath:
         """When .opus.enc exists but decrypt fails, falls back to .bin."""
         uid = 'test-uid'
         conv = 'test-conv'
-        base = tmp_path / 'chunks' / uid / conv
+        base = tmp_path / 'private-cloud-sync' / 'chunks' / uid / conv
         base.mkdir(parents=True)
 
         pcm_data = b'\x00' * 640
         (base / '1000.000.opus.enc').write_bytes(b'corrupt-opus-data')
         (base / '1000.000.bin').write_bytes(pcm_data)
 
-        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path)):
+        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path / 'private-cloud-sync')):
             with patch.object(storage_mod, 'encryption') as mock_encryption:
                 mock_encryption.decrypt_audio_file.side_effect = Exception("decrypt failed")
 
@@ -310,11 +310,11 @@ class TestDownloadFallbackPath:
         """When no extension exists for a timestamp, raises FileNotFoundError."""
         uid = 'test-uid'
         conv = 'test-conv'
-        base = tmp_path / 'chunks' / uid / conv
+        base = tmp_path / 'private-cloud-sync' / 'chunks' / uid / conv
         base.mkdir(parents=True)
         # No files created
 
-        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path)):
+        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path / 'private-cloud-sync')):
             with pytest.raises(FileNotFoundError):
                 storage_mod.download_audio_chunks_and_merge(uid, conv, [1000.0], fill_gaps=False)
 
@@ -322,7 +322,7 @@ class TestDownloadFallbackPath:
         """When .opus chunk is valid, uses it without trying .bin."""
         uid = 'test-uid'
         conv = 'test-conv'
-        base = tmp_path / 'chunks' / uid / conv
+        base = tmp_path / 'private-cloud-sync' / 'chunks' / uid / conv
         base.mkdir(parents=True)
 
         pcm_data = b'\x00' * 640
@@ -330,7 +330,7 @@ class TestDownloadFallbackPath:
         (base / '1000.000.opus').write_bytes(opus_data)
         # No .bin file
 
-        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path)):
+        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path / 'private-cloud-sync')):
             result = storage_mod.download_audio_chunks_and_merge(uid, conv, [1000.0], fill_gaps=False)
         assert len(result) == len(pcm_data)
 
@@ -338,7 +338,7 @@ class TestDownloadFallbackPath:
         """When .opus data is malformed (decode raises), falls back to .bin."""
         uid = 'test-uid'
         conv = 'test-conv'
-        base = tmp_path / 'chunks' / uid / conv
+        base = tmp_path / 'private-cloud-sync' / 'chunks' / uid / conv
         base.mkdir(parents=True)
 
         pcm_data = b'\x00' * 640
@@ -346,7 +346,7 @@ class TestDownloadFallbackPath:
         (base / '1000.000.opus').write_bytes(bad_opus)
         (base / '1000.000.bin').write_bytes(pcm_data)
 
-        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path)):
+        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path / 'private-cloud-sync')):
             result = storage_mod.download_audio_chunks_and_merge(uid, conv, [1000.0], fill_gaps=False)
         assert result == pcm_data
 
@@ -390,12 +390,12 @@ class TestListAudioChunksBatch:
         """list_audio_chunks recognizes .batch.bin with range timestamp."""
         uid = 'test-uid'
         conv = 'test-conv'
-        base = tmp_path / 'chunks' / uid / conv
+        base = tmp_path / 'private-cloud-sync' / 'chunks' / uid / conv
         base.mkdir(parents=True)
 
         (base / '1000.000-1010.000.batch.bin').write_bytes(b'\x00' * 480000)
 
-        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path)):
+        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path / 'private-cloud-sync')):
             chunks = storage_mod.list_audio_chunks(uid, conv)
 
         assert len(chunks) == 1
@@ -406,12 +406,12 @@ class TestListAudioChunksBatch:
         """list_audio_chunks recognizes .batch.enc with range timestamp."""
         uid = 'test-uid'
         conv = 'test-conv'
-        base = tmp_path / 'chunks' / uid / conv
+        base = tmp_path / 'private-cloud-sync' / 'chunks' / uid / conv
         base.mkdir(parents=True)
 
         (base / '1000.000-1010.000.batch.enc').write_bytes(b'\x00' * 500000)
 
-        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path)):
+        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path / 'private-cloud-sync')):
             chunks = storage_mod.list_audio_chunks(uid, conv)
 
         assert len(chunks) == 1
@@ -422,12 +422,12 @@ class TestListAudioChunksBatch:
         """Batch blob with single timestamp (short conversation)."""
         uid = 'test-uid'
         conv = 'test-conv'
-        base = tmp_path / 'chunks' / uid / conv
+        base = tmp_path / 'private-cloud-sync' / 'chunks' / uid / conv
         base.mkdir(parents=True)
 
         (base / '1000.000.batch.bin').write_bytes(b'\x00' * 160000)
 
-        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path)):
+        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path / 'private-cloud-sync')):
             chunks = storage_mod.list_audio_chunks(uid, conv)
 
         assert len(chunks) == 1
@@ -438,14 +438,14 @@ class TestListAudioChunksBatch:
         """Conversation with both single-chunk and batch blobs (migration period)."""
         uid = 'test-uid'
         conv = 'test-conv'
-        base = tmp_path / 'chunks' / uid / conv
+        base = tmp_path / 'private-cloud-sync' / 'chunks' / uid / conv
         base.mkdir(parents=True)
 
         (base / '1000.000.opus').write_bytes(b'\x00' * 8000)
         (base / '1005.000.opus').write_bytes(b'\x00' * 8000)
         (base / '1010.000-1025.000.batch.bin').write_bytes(b'\x00' * 480000)
 
-        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path)):
+        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path / 'private-cloud-sync')):
             chunks = storage_mod.list_audio_chunks(uid, conv)
 
         assert len(chunks) == 3
@@ -458,12 +458,12 @@ class TestListAudioChunksBatch:
         """Single-chunk blobs have is_batch=False."""
         uid = 'test-uid'
         conv = 'test-conv'
-        base = tmp_path / 'chunks' / uid / conv
+        base = tmp_path / 'private-cloud-sync' / 'chunks' / uid / conv
         base.mkdir(parents=True)
 
         (base / '1000.000.opus.enc').write_bytes(b'\x00' * 8000)
 
-        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path)):
+        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path / 'private-cloud-sync')):
             chunks = storage_mod.list_audio_chunks(uid, conv)
 
         assert len(chunks) == 1
@@ -477,12 +477,12 @@ class TestDeleteAudioChunksBatch:
         """Finds and deletes batch blob with single timestamp."""
         uid = 'test-uid'
         conv = 'test-conv'
-        base = tmp_path / 'chunks' / uid / conv
+        base = tmp_path / 'private-cloud-sync' / 'chunks' / uid / conv
         base.mkdir(parents=True)
 
         (base / '1000.000.batch.bin').write_bytes(b'\x00')
 
-        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path)):
+        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path / 'private-cloud-sync')):
             storage_mod.delete_audio_chunks(uid, conv, [1000.0])
 
         assert not (base / '1000.000.batch.bin').exists()
@@ -491,12 +491,12 @@ class TestDeleteAudioChunksBatch:
         """Finds and deletes range-named batch blob by scanning."""
         uid = 'test-uid'
         conv = 'test-conv'
-        base = tmp_path / 'chunks' / uid / conv
+        base = tmp_path / 'private-cloud-sync' / 'chunks' / uid / conv
         base.mkdir(parents=True)
 
         (base / '1000.000-1010.000.batch.bin').write_bytes(b'\x00' * 480000)
 
-        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path)):
+        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path / 'private-cloud-sync')):
             storage_mod.delete_audio_chunks(uid, conv, [1000.0, 1005.0, 1010.0])
 
         assert not (base / '1000.000-1010.000.batch.bin').exists()
@@ -509,13 +509,13 @@ class TestDownloadBatchBlobs:
         """Batch blob covering multiple timestamps is downloaded once."""
         uid = 'test-uid'
         conv = 'test-conv'
-        base = tmp_path / 'chunks' / uid / conv
+        base = tmp_path / 'private-cloud-sync' / 'chunks' / uid / conv
         base.mkdir(parents=True)
 
         pcm_data = b'\x00' * 480000
         (base / '1000.000-1010.000.batch.bin').write_bytes(pcm_data)
 
-        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path)):
+        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path / 'private-cloud-sync')):
             result = storage_mod.download_audio_chunks_and_merge(
                 uid, conv, [1000.0, 1005.0, 1010.0], fill_gaps=False
             )
@@ -526,7 +526,7 @@ class TestDownloadBatchBlobs:
         """Mix of single-chunk and batch blobs downloads correctly."""
         uid = 'test-uid'
         conv = 'test-conv'
-        base = tmp_path / 'chunks' / uid / conv
+        base = tmp_path / 'private-cloud-sync' / 'chunks' / uid / conv
         base.mkdir(parents=True)
 
         single_pcm = b'\x01' * 160000
@@ -536,7 +536,7 @@ class TestDownloadBatchBlobs:
         (base / '1000.000.opus').write_bytes(opus_encoded_single)
         (base / '1005.000-1015.000.batch.bin').write_bytes(batch_pcm)
 
-        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path)):
+        with patch.object(storage_mod, 'LOCAL_STORAGE_ROOT', str(tmp_path / 'private-cloud-sync')):
             result = storage_mod.download_audio_chunks_and_merge(
                 uid, conv, [1000.0, 1005.0, 1010.0, 1015.0], fill_gaps=False
             )
