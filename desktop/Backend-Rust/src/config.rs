@@ -85,6 +85,10 @@ pub struct Config {
     pub vertex_project_id: Option<String>,
     /// GCP region for Vertex AI (default: us-central1)
     pub vertex_location: String,
+    /// Enable local-first offline mode (bypasses Firestore, uses SQLite)
+    pub local_mode: bool,
+    /// Path for the local SQLite database (default: ./omi_local.db)
+    pub local_db_path: Option<String>,
 }
 
 impl Config {
@@ -158,6 +162,8 @@ impl Config {
                 .ok(),
             vertex_location: env::var("GCP_LOCATION")
                 .unwrap_or_else(|_| "us-central1".to_string()),
+            local_mode: env::var("LOCAL_MODE").ok().map(|v| v == "1" || v.to_lowercase() == "true").unwrap_or(false),
+            local_db_path: env::var("LOCAL_DB_PATH").ok(),
         }
     }
 
@@ -180,6 +186,9 @@ impl Config {
         }
         if self.encryption_secret.is_none() {
             tracing::warn!("ENCRYPTION_SECRET not set — encrypted user data will not be decryptable");
+        }
+        if self.local_mode {
+            tracing::info!("LOCAL_MODE enabled — using SQLite backend, bypassing Firestore");
         }
         Ok(())
     }

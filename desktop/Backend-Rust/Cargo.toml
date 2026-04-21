@@ -60,4 +60,7 @@ redis = { version = "0.25", features = ["tokio-comp", "connection-manager"] }
 # GCP authentication (Vertex AI service account tokens)
 gcp_auth = "0.12"
 
+# SQLite for local-first mode (LOCAL_MODE)
+rusqlite = { version = "0.31", features = ["bundled"] }
+
 # Note: Using Firestore REST API directly instead of gcloud-sdk for compatibility

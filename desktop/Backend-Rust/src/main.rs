@@ -35,13 +35,17 @@ use auth::{firebase_auth_extension, FirebaseAuth};
 use config::Config;
 use routes::{
     // Active (real traffic from current app)
-    agent_routes, auth_routes, chat_completions_routes, config_routes, crisp_routes,
-    health_routes, proxy_routes, screen_activity_routes, tts_routes, updates_routes,
-    webhook_routes,
+    action_items_routes, advice_routes, agent_routes, apps_routes, auth_routes,
+    chat_routes, chat_sessions_routes, chat_completions_routes, config_routes,
+    conversations_routes, crisp_routes, daily_score_routes, focus_sessions_routes,
+    folder_routes, goals_routes, health_routes, knowledge_graph_routes,
+    llm_usage_routes, memories_routes, messages_routes, people_routes, personas_routes,
+    proxy_routes, screen_activity_routes, staged_tasks_routes, stats_routes,
+    tts_routes, updates_routes, users_routes, webhook_routes,
     // Deprecated stubs (return 410 Gone — current app uses Python for all data CRUD)
     deprecated_routes,
 };
-use services::{FirestoreService, IntegrationService, RedisService};
+use services::{FirestoreService, IntegrationService, LocalDb, RedisService};
 
 /// Application state shared across handlers
 #[derive(Clone)]
@@ -54,6 +58,8 @@ pub struct AppState {
     pub gemini_rate_limiter: routes::rate_limit::SharedRateLimiter,
     /// Vertex AI auth provider (present when USE_VERTEX_AI=true)
     pub vertex_auth: Option<vertex::VertexAuth>,
+    /// Local SQLite database (only populated when LOCAL_MODE=1)
+    pub local_db: Option<Arc<LocalDb>>,
 }
 
 #[tokio::main]
@@ -230,6 +236,23 @@ async fn main() {
         });
     }
 
+    // Initialize local SQLite database when LOCAL_MODE=1
+    let local_db = if config.local_mode {
+        let db_path = config.local_db_path.clone()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("./omi_local.db"));
+        tracing::info!("LOCAL_MODE enabled — opening SQLite at {:?}", db_path);
+        match LocalDb::open(db_path).await {
+            Ok(db) => Some(Arc::new(db)),
+            Err(e) => {
+                tracing::error!("Failed to open local database: {} — LOCAL_MODE will be disabled", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let state = AppState {
         firestore,
         integrations,
@@ -237,7 +260,11 @@ async fn main() {
         config: Arc::new(config.clone()),
         crisp_session_cache: routes::crisp::new_session_cache(),
         gemini_rate_limiter,
+<<<<<<< HEAD
         vertex_auth,
+=======
+        local_db,
+>>>>>>> 12c1bf60a ([Packet F][Flow: Rust CRUD Parity] Add SQLite-backed local DB layer for LOCAL_MODE)
     };
 
     // Build CORS layer
