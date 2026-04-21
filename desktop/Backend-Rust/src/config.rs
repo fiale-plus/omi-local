@@ -8,6 +8,10 @@ use std::env;
 pub struct Config {
     /// Server port
     pub port: u16,
+    /// Local mode — when enabled, the app uses provided URLs directly
+    /// without starting local backend, auth, or tunnel services.
+    /// Equivalent to OMI_SKIP_BACKEND=1 OMI_SKIP_AUTH=1 OMI_SKIP_TUNNEL=1.
+    pub local_mode: bool,
     /// Gemini API key for LLM calls
     pub gemini_api_key: Option<String>,
     /// Firebase project ID (used for Firestore)
@@ -92,6 +96,10 @@ impl Config {
                     eprintln!("WARNING: PORT not set — defaulting to 10201. Set PORT in .env (avoid 8080 to prevent port conflicts).");
                     10201
                 }),
+            local_mode: env::var("LOCAL_MODE")
+                .ok()
+                .map(|v| v == "1" || v.to_lowercase() == "true")
+                .unwrap_or(false),
             gemini_api_key: env::var("GEMINI_API_KEY").ok(),
             firebase_project_id: env::var("FIREBASE_PROJECT_ID").ok()
                 .or_else(|| env::var("GCP_PROJECT_ID").ok()),
