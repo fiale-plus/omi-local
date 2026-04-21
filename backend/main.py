@@ -54,6 +54,8 @@ from routers import (
     chat_sessions,
     scores,
     tts,
+    local_listen,
+)
 )
 
 from utils.other.timeout import TimeoutMiddleware
@@ -124,6 +126,7 @@ app.include_router(advice.router)
 app.include_router(chat_sessions.router)
 app.include_router(scores.router)
 app.include_router(tts.router)
+app.include_router(local_listen.router)
 
 
 methods_timeout = {
