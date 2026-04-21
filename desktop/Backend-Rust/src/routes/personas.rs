@@ -17,6 +17,31 @@ use crate::models::{
 use crate::AppState;
 
 // ============================================================================
+// LLM CLIENT FACTORY
+// ============================================================================
+
+/// Build an `LlmClient` from app state, routing to local gateway if LOCAL_MODE
+/// LLM is configured, otherwise falling back to Gemini with the configured key.
+fn make_llm(state: &AppState, api_key: String) -> LlmClient {
+    if state.config.local_mode
+        && state.config.local_llm_base_url.is_some()
+        && state.config.local_llm_model.is_some()
+    {
+        LlmClient::new_local(
+            state.config.local_llm_base_url.as_ref().unwrap().clone(),
+            state.config.local_llm_model.as_ref().unwrap().clone(),
+            state.config.local_llm_api_key.clone().unwrap_or_else(|| "local".to_string()),
+        )
+    } else {
+        LlmClient::new(
+            api_key,
+            state.config.local_llm_base_url.clone(),
+            state.config.local_llm_model.clone(),
+        )
+    }
+}
+
+// ============================================================================
 // Persona CRUD Endpoints
 // ============================================================================
 
@@ -110,6 +135,8 @@ async fn create_persona(
         if state.vertex_auth.is_some() || state.config.gemini_api_key.is_some() {
             let llm = LlmClient::new(state.config.gemini_api_key.clone().unwrap_or_default())
                 .with_vertex(state.vertex_auth.clone());
+        if let Some(api_key) = &state.config.gemini_api_key {
+            let llm = make_llm(&state, api_key.clone());
             match llm.generate_persona_from_memories(&request.name, &memories).await {
                 Ok(result) => (result.description, Some(result.persona_prompt)),
                 Err(e) => {
@@ -309,6 +336,7 @@ async fn generate_prompt(
 
     let llm = LlmClient::new(state.config.gemini_api_key.clone().unwrap_or_default())
         .with_vertex(state.vertex_auth.clone());
+    let llm = make_llm(&state, api_key.clone());
     let result = llm
         .generate_persona_from_memories(&persona.name, &memories)
         .await

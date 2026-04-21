@@ -8,10 +8,6 @@ use std::env;
 pub struct Config {
     /// Server port
     pub port: u16,
-    /// Local mode — when enabled, the app uses provided URLs directly
-    /// without starting local backend, auth, or tunnel services.
-    /// Equivalent to OMI_SKIP_BACKEND=1 OMI_SKIP_AUTH=1 OMI_SKIP_TUNNEL=1.
-    pub local_mode: bool,
     /// Gemini API key for LLM calls
     pub gemini_api_key: Option<String>,
     /// Firebase project ID (used for Firestore)
@@ -93,6 +89,14 @@ pub struct Config {
     pub local_mode: bool,
     /// Path for the local SQLite database (default: ./omi_local.db)
     pub local_db_path: Option<String>,
+    /// OpenAI-compatible base URL for local LLM gateway (e.g. http://localhost:11434/v1)
+    /// Used when LOCAL_MODE=1 to route all LLM calls to a local model server.
+    pub local_llm_base_url: Option<String>,
+    /// Model name to request from the local LLM gateway.
+    /// Example values: "llama3", "mistral", "gemma3:4b" (Ollama model names).
+    pub local_llm_model: Option<String>,
+    /// API key for the local LLM gateway (optional for most local servers like Ollama).
+    pub local_llm_api_key: Option<String>,
     /// Bind to localhost only (for development)
     pub bind_localhost: bool,
 }
@@ -108,10 +112,6 @@ impl Config {
                     eprintln!("WARNING: PORT not set — defaulting to 10201. Set PORT in .env (avoid 8080 to prevent port conflicts).");
                     10201
                 }),
-            local_mode: env::var("LOCAL_MODE")
-                .ok()
-                .map(|v| v == "1" || v.to_lowercase() == "true")
-                .unwrap_or(false),
             gemini_api_key: env::var("GEMINI_API_KEY").ok(),
             firebase_project_id: env::var("FIREBASE_PROJECT_ID").ok()
                 .or_else(|| env::var("GCP_PROJECT_ID").ok()),
@@ -175,6 +175,10 @@ impl Config {
             local_mode: env::var("LOCAL_MODE").ok().map(|v| v == "1" || v.to_lowercase() == "true").unwrap_or(false),
             local_db_path: env::var("LOCAL_DB_PATH").ok(),
             bind_localhost: env::var("BIND_LOCALHOST").map(|v| v == "true").unwrap_or(false),
+            local_llm_base_url: env::var("LOCAL_LLM_BASE_URL").ok(),
+            local_llm_model: env::var("LOCAL_LLM_MODEL").ok(),
+            local_llm_api_key: env::var("LOCAL_LLM_API_KEY").ok(),
+            bind_localhost: env::var("BIND_LOCALHOST").map(|v| v == "true").unwrap_or(false),
         }
     }
 
@@ -206,6 +210,17 @@ impl Config {
         }
         if self.local_mode {
             tracing::info!("LOCAL_MODE enabled — using SQLite backend, bypassing Firestore");
+        }
+        if self.local_mode && self.local_llm_base_url.is_some() && self.local_llm_model.is_some() {
+            tracing::info!(
+                "LOCAL_MODE LLM: base_url={} model={}",
+                self.local_llm_base_url.as_ref().unwrap(),
+                self.local_llm_model.as_ref().unwrap()
+            );
+        } else if self.local_mode && self.local_llm_base_url.is_none() {
+            tracing::warn!(
+                "LOCAL_MODE=1 but LOCAL_LLM_BASE_URL not set — LLM extraction will be skipped"
+            );
         }
         Ok(())
     }

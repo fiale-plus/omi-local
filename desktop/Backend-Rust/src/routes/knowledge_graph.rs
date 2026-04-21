@@ -18,6 +18,34 @@ use crate::models::{
 };
 use crate::AppState;
 
+// ============================================================================
+// LLM CLIENT FACTORY
+// ============================================================================
+
+/// Build an `LlmClient` from app state, routing to local gateway if LOCAL_MODE
+/// LLM is configured, otherwise falling back to Gemini with the configured key.
+fn make_llm(state: &AppState, api_key: String) -> LlmClient {
+    if state.config.local_mode
+        && state.config.local_llm_base_url.is_some()
+        && state.config.local_llm_model.is_some()
+    {
+        LlmClient::new_local(
+            state.config.local_llm_base_url.as_ref().unwrap().clone(),
+            state.config.local_llm_model.as_ref().unwrap().clone(),
+            state.config.local_llm_api_key.clone().unwrap_or_else(|| "local".to_string()),
+        )
+    } else {
+        LlmClient::new(
+            api_key,
+            state.config.local_llm_base_url.clone(),
+            state.config.local_llm_model.clone(),
+        )
+    }
+}
+
+// ============================================================================
+// Knowledge Graph Endpoints
+
 /// GET /v1/knowledge-graph - Get the full knowledge graph
 async fn get_knowledge_graph(
     State(state): State<AppState>,
@@ -97,6 +125,7 @@ async fn rebuild_knowledge_graph(
     // Create LLM client
     let llm = LlmClient::new(api_key)
         .with_vertex(state.vertex_auth.clone())
+    let llm = make_llm(&state, api_key)
         .with_model(crate::llm::model_qos::gemini_extraction());
 
     // Track nodes by lowercase label for deduplication
