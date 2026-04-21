@@ -193,8 +193,8 @@ class LocalListenSession:
         """
         Store conversation metadata locally.
         
-        In LOCAL_MODE, this writes to local filesystem and communicates
-        with desktop Backend-Rust for SQLite storage.
+        In LOCAL_MODE, this writes to local filesystem and local SQLite database.
+        Also triggers background processing via local LLM if available.
         """
         try:
             # Write transcript segments to local file
@@ -202,19 +202,26 @@ class LocalListenSession:
                 self.storage_dir, 
                 f"{conversation_id}_segments.json"
             )
+            
+            conversation_data = {
+                "id": conversation_id,
+                "uid": self.uid,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "started_at": datetime.fromtimestamp(
+                    self.conversation_start_time, tz=timezone.utc
+                ).isoformat() if self.conversation_start_time else None,
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "language": self.language,
+                "status": "pending",
+                "source": "local_listen",
+            }
+            
+            # Add segments as transcript_segments for compatibility
+            if self.segments:
+                conversation_data["transcript_segments"] = self.segments
+            
             with open(segments_file, "w") as f:
-                json.dump({
-                    "id": conversation_id,
-                    "uid": self.uid,
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                    "started_at": datetime.fromtimestamp(
-                        self.conversation_start_time, tz=timezone.utc
-                    ).isoformat() if self.conversation_start_time else None,
-                    "finished_at": datetime.now(timezone.utc).isoformat(),
-                    "language": self.language,
-                    "segments": self.segments,
-                    "status": "completed",
-                }, f, indent=2)
+                json.dump(conversation_data, f, indent=2)
             
             # Store audio file reference
             audio_file = os.path.join(
@@ -223,6 +230,14 @@ class LocalListenSession:
             )
             
             logger.info(f"Stored conversation locally: {conversation_id} uid={self.uid}")
+            
+            # Save to local SQLite for LOCAL_MODE processing
+            try:
+                from database.local_db import upsert_conversation
+                upsert_conversation(self.uid, conversation_data)
+                logger.info(f"Saved conversation to local SQLite: {conversation_id}")
+            except Exception as e:
+                logger.warning(f"Failed to save conversation to local SQLite: {e}")
             
         except Exception as e:
             logger.error(f"Error storing conversation locally: {e}")
