@@ -1,20 +1,95 @@
 import copy
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
+import os
 
-from google.cloud import firestore
-from google.cloud.firestore_v1 import FieldFilter
+# LOCAL_MODE: SQLite-only, no Firestore
+_LOCAL_MODE = os.getenv("LOCAL_MODE", "").lower() in ("1", "true", "yes")
 
-from ._client import db
-from database import users as users_db
-from utils import encryption
-from .helpers import set_data_protection_level, prepare_for_write, prepare_for_read
-import logging
+if _LOCAL_MODE:
+    memories_collection = "memories"
+    users_collection = "users"
 
-logger = logging.getLogger(__name__)
+    def _encrypt_memory_data(memory_data: Dict[str, Any], uid: str) -> Dict[str, Any]:
+        return memory_data
 
-memories_collection = 'memories'
-users_collection = 'users'
+    def _decrypt_memory_data(memory_data: Dict[str, Any], uid: str) -> Dict[str, Any]:
+        return memory_data
+
+    def create_memory(uid: str, memory_data: Dict[str, Any]):
+        raise NotImplementedError("cloud-only")
+
+    def get_memory(uid: str, memory_id: str):
+        return None
+
+    def get_memories(uid: str, limit: int = 100, offset: int = 0):
+        from database.local_db import get_memories as _get
+        return _get(uid, limit, offset)
+
+    def update_memory(uid: str, memory_id: str, updates: Dict[str, Any]):
+        raise NotImplementedError("cloud-only")
+
+    def delete_memory(uid: str, memory_id: str):
+        raise NotImplementedError("cloud-only")
+
+    def get_memories_by_conversation(uid: str, conversation_id: str):
+        return []
+
+    def get_memories_by_person(uid: str, person_id: str):
+        return []
+
+    def get_memories_by_goal(uid: str, goal_id: str):
+        return []
+
+    def get_memories_by_date_range(
+        uid: str, start_date: datetime, end_date: datetime, limit: int = 100
+    ):
+        return []
+
+    def get_memories_count(uid: str) -> int:
+        return 0
+
+    def get_memories_batch(uid: str, memory_ids: List[str]):
+        return []
+
+    def search_memories(uid: str, query: str, limit: int = 10):
+        return []
+
+    def set_memory_content(uid: str, memory_id: str, content: str):
+        raise NotImplementedError("cloud-only")
+
+    def set_memory_locked(uid: str, memory_id: str, is_locked: bool):
+        raise NotImplementedError("cloud-only")
+
+    def set_memory_category(uid: str, memory_id: str, category: str):
+        raise NotImplementedError("cloud-only")
+
+    def get_memory_conversation_id(uid: str, memory_id: str):
+        return None
+
+    def get_memory_metadata(uid: str, memory_id: str):
+        return {}
+
+    def set_memory_metadata(uid: str, memory_id: str, metadata: Dict[str, Any]):
+        raise NotImplementedError("cloud-only")
+
+    def set_memory_kg_extracted(uid: str, memory_id: str, kg_extracted: bool):
+        raise NotImplementedError("cloud-only")
+
+else:
+    from google.cloud import firestore
+    from google.cloud.firestore_v1 import FieldFilter
+
+    from ._client import db
+    from database import users as users_db
+    from utils import encryption
+    from .helpers import set_data_protection_level, prepare_for_write, prepare_for_read
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    memories_collection = "memories"
+    users_collection = "users"
 
 
 # *********************************

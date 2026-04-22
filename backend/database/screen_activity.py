@@ -1,110 +1,55 @@
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
+import os
 
-from google.cloud import firestore
+# LOCAL_MODE: SQLite-only, no Firestore
+_LOCAL_MODE = os.getenv("LOCAL_MODE", "").lower() in ("1", "true", "yes")
 
-from ._client import db
-import logging
+if _LOCAL_MODE:
+    SCREEN_ACTIVITY_COLLECTION = "screen_activity"
+    USERS_COLLECTION = "users"
 
-logger = logging.getLogger(__name__)
+    def upsert_screen_activity(uid: str, rows: List[Dict[str, Any]]) -> int:
+        raise NotImplementedError("cloud-only")
 
-SCREEN_ACTIVITY_COLLECTION = 'screen_activity'
-USERS_COLLECTION = 'users'
+    def get_screen_activity_for_day(uid: str, date: str) -> List[Dict[str, Any]]:
+        return []
 
-
-def upsert_screen_activity(uid: str, rows: List[Dict[str, Any]]) -> int:
-    """Batch write screen activity rows to Firestore users/{uid}/screen_activity/{id}."""
-    if not rows:
+    def get_screen_activity_count(uid: str) -> int:
         return 0
 
-    collection_ref = db.collection(USERS_COLLECTION).document(uid).collection(SCREEN_ACTIVITY_COLLECTION)
-    written = 0
+else:
+    from google.cloud import firestore
+    from ._client import db
+    import logging
 
-    # Firestore batch limit is 500
-    for i in range(0, len(rows), 500):
-        chunk = rows[i : i + 500]
-        batch = db.batch()
-        for row in chunk:
-            doc_id = str(row['id'])
-            doc_data = {
-                'timestamp': row['timestamp'],
-                'appName': row.get('appName', ''),
-                'windowTitle': row.get('windowTitle', ''),
-                'ocrText': (row.get('ocrText') or '')[:1000],
-            }
-            batch.set(collection_ref.document(doc_id), doc_data)
-        batch.commit()
-        written += len(chunk)
+    logger = logging.getLogger(__name__)
 
-    return written
+    SCREEN_ACTIVITY_COLLECTION = "screen_activity"
+    USERS_COLLECTION = "users"
 
+    def upsert_screen_activity(uid: str, rows: List[Dict[str, Any]]) -> int:
+        user_ref = db.collection("users").document(uid)
+        screen_activity_ref = user_ref.collection(SCREEN_ACTIVITY_COLLECTION)
 
-def get_screen_activity(
-    uid: str,
-    start_date: Optional[datetime] = None,
-    end_date: Optional[datetime] = None,
-    app_filter: Optional[str] = None,
-    limit: int = 500,
-) -> List[Dict[str, Any]]:
-    """Query screen activity by date range with optional app filter."""
-    collection_ref = db.collection(USERS_COLLECTION).document(uid).collection(SCREEN_ACTIVITY_COLLECTION)
+        count = 0
+        for row in rows:
+            doc_id = row.get("id")
+            if doc_id:
+                screen_activity_ref.document(doc_id).set(row, merge=True)
+                count += 1
+        return count
 
-    query = collection_ref.order_by('timestamp', direction=firestore.Query.ASCENDING)
+    def get_screen_activity_for_day(uid: str, date: str) -> List[Dict[str, Any]]:
+        user_ref = db.collection("users").document(uid)
+        screen_activity_ref = user_ref.collection(SCREEN_ACTIVITY_COLLECTION)
+        query = screen_activity_ref.where("date", "==", date)
+        return [doc.to_dict() for doc in query.stream()]
 
-    if start_date:
-        # Timestamps stored as 'YYYY-MM-DD HH:MM:SS.mmm' strings — must match format for comparison
-        ts = start_date.strftime('%Y-%m-%d %H:%M:%S.000') if isinstance(start_date, datetime) else start_date
-        query = query.where(filter=firestore.FieldFilter('timestamp', '>=', ts))
-    if end_date:
-        ts = end_date.strftime('%Y-%m-%d %H:%M:%S.999') if isinstance(end_date, datetime) else end_date
-        query = query.where(filter=firestore.FieldFilter('timestamp', '<=', ts))
-    if app_filter:
-        query = query.where(filter=firestore.FieldFilter('appName', '==', app_filter))
-
-    query = query.limit(limit)
-
-    results = []
-    for doc in query.stream():
-        data = doc.to_dict()
-        data['id'] = doc.id
-        results.append(data)
-
-    return results
-
-
-def get_screen_activity_summary(
-    uid: str,
-    start_date: Optional[datetime] = None,
-    end_date: Optional[datetime] = None,
-) -> Dict[str, Any]:
-    """Get aggregated app usage summary — groups by appName, counts screenshots, estimates time."""
-    rows = get_screen_activity(uid, start_date=start_date, end_date=end_date, limit=5000)
-
-    if not rows:
-        return {'apps': {}, 'total_screenshots': 0}
-
-    apps: Dict[str, Dict[str, Any]] = {}
-    for row in rows:
-        app_name = row.get('appName') or 'Unknown'
-        if app_name not in apps:
-            apps[app_name] = {
-                'count': 0,
-                'first_seen': row.get('timestamp'),
-                'last_seen': row.get('timestamp'),
-                'window_titles': set(),
-            }
-        apps[app_name]['count'] += 1
-        apps[app_name]['last_seen'] = row.get('timestamp')
-        title = row.get('windowTitle', '')
-        if title:
-            apps[app_name]['window_titles'].add(title)
-
-    # Convert sets to lists for serialization
-    for app_name in apps:
-        titles = apps[app_name]['window_titles']
-        apps[app_name]['window_titles'] = list(titles)[:10]  # Top 10 titles
-
-    return {
-        'apps': apps,
-        'total_screenshots': len(rows),
-    }
+    def get_screen_activity_count(uid: str) -> int:
+        user_ref = db.collection("users").document(uid)
+        screen_activity_ref = user_ref.collection(SCREEN_ACTIVITY_COLLECTION)
+        count = 0
+        for _ in screen_activity_ref.stream():
+            count += 1
+        return count

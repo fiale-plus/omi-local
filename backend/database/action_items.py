@@ -1,44 +1,148 @@
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List
-from google.cloud import firestore
-from google.cloud.firestore_v1 import FieldFilter
+import os
 
-from ._client import db
-import logging
+# LOCAL_MODE: SQLite-only, no Firestore
+_LOCAL_MODE = os.getenv("LOCAL_MODE", "").lower() in ("1", "true", "yes")
 
-logger = logging.getLogger(__name__)
+if _LOCAL_MODE:
+    # Stub: local SQLite layer is handled by local_db.py
+    action_items_collection = "action_items"
 
+    def _prepare_action_item_for_write(action_item_data: dict) -> dict:
+        return action_item_data
 
-# Collection name
-action_items_collection = 'action_items'
+    def get_action_items(uid: str, limit: int = 100, offset: int = 0):
+        from database.local_db import get_action_items as _get
+        return _get(uid, limit, offset)
 
+    def create_action_item(uid: str, action_item_data: dict):
+        raise NotImplementedError("cloud-only")
 
-def _prepare_action_item_for_write(action_item_data: dict) -> dict:
-    """Prepare action item data for writing to database"""
-    # Ensure timestamps are properly formatted
-    if 'created_at' in action_item_data and action_item_data['created_at']:
-        if isinstance(action_item_data['created_at'], str):
-            action_item_data['created_at'] = datetime.fromisoformat(
-                action_item_data['created_at'].replace('Z', '+00:00')
-            )
+    def get_action_item(uid: str, action_item_id: str):
+        return None
 
-    if 'updated_at' in action_item_data and action_item_data['updated_at']:
-        if isinstance(action_item_data['updated_at'], str):
-            action_item_data['updated_at'] = datetime.fromisoformat(
-                action_item_data['updated_at'].replace('Z', '+00:00')
-            )
+    def update_action_item(uid: str, action_item_id: str, updates: dict):
+        raise NotImplementedError("cloud-only")
 
-    if 'due_at' in action_item_data and action_item_data['due_at']:
-        if isinstance(action_item_data['due_at'], str):
-            action_item_data['due_at'] = datetime.fromisoformat(action_item_data['due_at'].replace('Z', '+00:00'))
+    def delete_action_item(uid: str, action_item_id: str):
+        raise NotImplementedError("cloud-only")
 
-    if 'completed_at' in action_item_data and action_item_data['completed_at']:
-        if isinstance(action_item_data['completed_at'], str):
-            action_item_data['completed_at'] = datetime.fromisoformat(
-                action_item_data['completed_at'].replace('Z', '+00:00')
-            )
+    def get_action_items_by_conversation(
+        uid: str, conversation_id: str, limit: int = 100, offset: int = 0
+    ):
+        return []
 
-    return action_item_data
+    def get_action_items_by_conversation_id_list(
+        uid: str, conversation_ids: List[str], completed: Optional[bool] = None
+    ):
+        return []
+
+    def get_action_items_across_conversations(uid: str, limit: int = 100, offset: int = 0):
+        return []
+
+    def get_action_items_by_person(
+        uid: str, person_id: str, limit: int = 100, offset: int = 0
+    ):
+        return []
+
+    def get_action_items_by_goal(
+        uid: str, goal_id: str, limit: int = 100, offset: int = 0
+    ):
+        return []
+
+    def get_action_items_by_folder(
+        uid: str, folder_id: str, limit: int = 100, offset: int = 0
+    ):
+        return []
+
+    def get_action_items_by_date_range(
+        uid: str, start_date: datetime, end_date: datetime, limit: int = 100
+    ):
+        return []
+
+    def get_due_action_items(uid: str, due_before: datetime, limit: int = 100):
+        return []
+
+    def get_overdue_action_items(uid: str, limit: int = 100):
+        return []
+
+    def get_action_items_count(uid: str) -> int:
+        return 0
+
+    def get_action_items_batch(
+        uid: str, action_item_ids: List[str], include_discarded: bool = False
+    ):
+        return []
+
+    def get_action_item_conversation_id(uid: str, action_item_id: str):
+        return None
+
+    def set_action_item_completed(
+        uid: str, action_item_id: str, completed: bool, completed_at: Optional[datetime] = None
+    ):
+        raise NotImplementedError("cloud-only")
+
+    def set_action_item_title(uid: str, action_item_id: str, title: str):
+        raise NotImplementedError("cloud-only")
+
+    def set_action_item_due_at(
+        uid: str, action_item_id: str, due_at: Optional[datetime]
+    ):
+        raise NotImplementedError("cloud-only")
+
+    def set_action_item_description(
+        uid: str, action_item_id: str, description: str
+    ):
+        raise NotImplementedError("cloud-only")
+
+    def set_action_item_discarded(uid: str, action_item_id: str, discarded: bool):
+        raise NotImplementedError("cloud-only")
+
+    def delete_all_action_items_for_conversation(
+        uid: str, conversation_id: str
+    ):
+        raise NotImplementedError("cloud-only")
+
+else:
+    from google.cloud import firestore
+    from google.cloud.firestore_v1 import FieldFilter
+
+    from ._client import db
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    # Collection name
+    action_items_collection = "action_items"
+
+    def _prepare_action_item_for_write(action_item_data: dict) -> dict:
+        # Ensure timestamps are properly formatted
+        if "created_at" in action_item_data and action_item_data["created_at"]:
+            if isinstance(action_item_data["created_at"], str):
+                action_item_data["created_at"] = datetime.fromisoformat(
+                    action_item_data["created_at"].replace("Z", "+00:00")
+                )
+
+        if "updated_at" in action_item_data and action_item_data["updated_at"]:
+            if isinstance(action_item_data["updated_at"], str):
+                action_item_data["updated_at"] = datetime.fromisoformat(
+                    action_item_data["updated_at"].replace("Z", "+00:00")
+                )
+
+        if "due_at" in action_item_data and action_item_data["due_at"]:
+            if isinstance(action_item_data["due_at"], str):
+                action_item_data["due_at"] = datetime.fromisoformat(
+                    action_item_data["due_at"].replace("Z", "+00:00")
+                )
+
+        if "completed_at" in action_item_data and action_item_data["completed_at"]:
+            if isinstance(action_item_data["completed_at"], str):
+                action_item_data["completed_at"] = datetime.fromisoformat(
+                    action_item_data["completed_at"].replace("Z", "+00:00")
+                )
+
+        return action_item_data
 
 
 def _prepare_action_item_for_read(action_item_data: dict) -> dict:

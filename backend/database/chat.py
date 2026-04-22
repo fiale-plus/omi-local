@@ -3,61 +3,171 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 
-from google.cloud import firestore
-from google.cloud.firestore_v1 import FieldFilter
+import os
 
-from database import users as users_db
-from models.chat import Message
-from utils import encryption
-from utils.other.endpoints import timeit
-from ._client import db
-from .helpers import set_data_protection_level, prepare_for_write, prepare_for_read
-import logging
+# LOCAL_MODE: SQLite-only, no Firestore
+_LOCAL_MODE = os.getenv("LOCAL_MODE", "").lower() in ("1", "true", "yes")
 
-logger = logging.getLogger(__name__)
+if _LOCAL_MODE:
+    # Stub: local SQLite layer handles chat sessions
+    BATCH_LIMIT = 500
 
-BATCH_LIMIT = 500  # Firestore hard limit
+    def _encrypt_chat_data(chat_data: Dict[str, Any], uid: str) -> Dict[str, Any]:
+        return chat_data
 
-# *********************************
-# ******* ENCRYPTION HELPERS ******
-# *********************************
+    def _decrypt_chat_data(chat_data: Dict[str, Any], uid: str) -> Dict[str, Any]:
+        return chat_data
 
+    def create_chat_session(uid: str, chat_data: Dict[str, Any]):
+        raise NotImplementedError("cloud-only")
 
-def _encrypt_chat_data(chat_data: Dict[str, Any], uid: str) -> Dict[str, Any]:
-    data = copy.deepcopy(chat_data)
+    def chat_session_exists(uid: str, chat_session_id: str) -> bool:
+        return False
 
-    if 'text' in data and isinstance(data['text'], str):
-        data['text'] = encryption.encrypt(data['text'], uid)
-    return data
-
-
-def _decrypt_chat_data(chat_data: Dict[str, Any], uid: str) -> Dict[str, Any]:
-    data = copy.deepcopy(chat_data)
-
-    if 'text' in data and isinstance(data['text'], str):
-        try:
-            data['text'] = encryption.decrypt(data['text'], uid)
-        except Exception:
-            pass
-
-    return data
-
-
-def _prepare_data_for_write(data: Dict[str, Any], uid: str, level: str) -> Dict[str, Any]:
-    if level == 'enhanced':
-        return _encrypt_chat_data(data, uid)
-    return data
-
-
-def _prepare_message_for_read(message_data: Optional[Dict[str, Any]], uid: str) -> Optional[Dict[str, Any]]:
-    if not message_data:
+    def get_chat_session(uid: str, chat_session_id: str):
         return None
 
-    level = message_data.get('data_protection_level')
-    if level == 'enhanced':
-        return _decrypt_chat_data(message_data, uid)
+    def get_chat_sessions(uid: str, limit: int = 50, offset: int = 0):
+        return []
 
-    return message_data
+    def update_chat_session(uid: str, chat_session_id: str, updates: Dict[str, Any]):
+        raise NotImplementedError("cloud-only")
+
+    def delete_chat_session(uid: str, chat_session_id: str):
+        raise NotImplementedError("cloud-only")
+
+    def delete_all_chat_sessions_for_user(uid: str):
+        raise NotImplementedError("cloud-only")
+
+    def add_chat_message(uid: str, chat_session_id: str, message_data: Dict[str, Any]):
+        raise NotImplementedError("cloud-only")
+
+    def get_chat_messages(
+        uid: str, chat_session_id: str, limit: int = 100, offset: int = 0
+    ):
+        return []
+
+    def update_chat_message(uid: str, chat_session_id: str, message_id: str, updates: Dict[str, Any]):
+        raise NotImplementedError("cloud-only")
+
+    def delete_chat_message(uid: str, chat_session_id: str, message_id: str):
+        raise NotImplementedError("cloud-only")
+
+    def delete_all_chat_messages(uid: str, chat_session_id: str):
+        raise NotImplementedError("cloud-only")
+
+    def set_chat_message_reaction(
+        uid: str, chat_session_id: str, message_id: str, reaction: Dict[str, Any]
+    ):
+        raise NotImplementedError("cloud-only")
+
+    def remove_chat_message_reaction(
+        uid: str, chat_session_id: str, message_id: str, reaction_id: str
+    ):
+        raise NotImplementedError("cloud-only")
+
+    def get_recent_chat_sessions(uid: str, limit: int = 10):
+        return []
+
+    def get_chat_sessions_count(uid: str) -> int:
+        return 0
+
+    def get_or_create_default_chat_session(uid: str):
+        raise NotImplementedError("cloud-only")
+
+    def set_chat_session_title(uid: str, chat_session_id: str, title: str):
+        raise NotImplementedError("cloud-only")
+
+    def set_chat_session_system_prompt(uid: str, chat_session_id: str, system_prompt: str):
+        raise NotImplementedError("cloud-only")
+
+    def set_chat_session_shared_settings(
+        uid: str, chat_session_id: str, settings: Dict[str, Any]
+    ):
+        raise NotImplementedError("cloud-only")
+
+    def set_chat_session_hume_context_id(
+        uid: str, chat_session_id: str, hume_context_id: str
+    ):
+        raise NotImplementedError("cloud-only")
+
+    def set_chat_session_llm_model(uid: str, chat_session_id: str, model: str):
+        raise NotImplementedError("cloud-only")
+
+    def set_chat_session_temperature(uid: str, chat_session_id: str, temperature: float):
+        raise NotImplementedError("cloud-only")
+
+    def set_chat_session_max_tokens(uid: str, chat_session_id: str, max_tokens: int):
+        raise NotImplementedError("cloud-only")
+
+    def set_chat_session_prompt(uid: str, chat_session_id: str, prompt: str):
+        raise NotImplementedError("cloud-only")
+
+    def search_chat_sessions(uid: str, query: str, limit: int = 10):
+        return []
+
+    def get_chat_session_shared_settings(uid: str, chat_session_id: str):
+        return {}
+
+    def batch_import_chat_messages(
+        uid: str, chat_session_id: str, messages: List[Dict[str, Any]]
+    ):
+        raise NotImplementedError("cloud-only")
+
+else:
+    from google.cloud import firestore
+    from google.cloud.firestore_v1 import FieldFilter
+
+    from database import users as users_db
+    from models.chat import Message
+    from utils import encryption
+    from utils.other.endpoints import timeit
+    from ._client import db
+    from .helpers import set_data_protection_level, prepare_for_write, prepare_for_read
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    BATCH_LIMIT = 500  # Firestore hard limit
+
+    # *********************************
+    # ******* ENCRYPTION HELPERS ******
+    # *********************************
+
+    def _encrypt_chat_data(chat_data: Dict[str, Any], uid: str) -> Dict[str, Any]:
+        data = copy.deepcopy(chat_data)
+
+        if "text" in data and isinstance(data["text"], str):
+            data["text"] = encryption.encrypt(data["text"], uid)
+        return data
+
+    def _decrypt_chat_data(chat_data: Dict[str, Any], uid: str) -> Dict[str, Any]:
+        data = copy.deepcopy(chat_data)
+
+        if "text" in data and isinstance(data["text"], str):
+            try:
+                data["text"] = encryption.decrypt(data["text"], uid)
+            except Exception:
+                pass
+
+        return data
+
+    def _prepare_data_for_write(data: Dict[str, Any], uid: str, level: str) -> Dict[str, Any]:
+        if level == "enhanced":
+            return _encrypt_chat_data(data, uid)
+        return data
+
+    def _prepare_message_for_read(
+        message_data: Optional[Dict[str, Any]], uid: str
+    ) -> Optional[Dict[str, Any]]:
+        if not message_data:
+            return None
+
+        level = message_data.get("data_protection_level")
+        if level == "enhanced":
+            return _decrypt_chat_data(message_data, uid)
+
+        return message_data
 
 
 # *****************************
