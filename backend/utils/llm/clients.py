@@ -3,7 +3,6 @@ import logging
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
-import anthropic
 import httpx
 from cachetools import TTLCache
 from langchain_core.language_models import BaseChatModel
@@ -13,7 +12,6 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 import tiktoken
 
 from models.structured import Structured
-from utils.byok import get_byok_key
 from utils.llm.usage_tracker import get_usage_callback
 
 logger = logging.getLogger(__name__)
@@ -27,18 +25,20 @@ _usage_callback = get_usage_callback()
 # For get_llm() callers: resolved inline — no wrapper class needed.
 # For module-level singletons (anthropic_client, embeddings): proxy classes
 # provide lazy resolution since there's no request context at import time.
+# --------------------------------------------------------------------------
 # LOCAL_MODE — OpenAI-compatible local gateway
 #
 # When LOCAL_MODE=1 the entire stack runs without cloud credentials.
 # LOCAL_LLM_BASE_URL should point to an OpenAI-compatible local server
 # (e.g. Ollama at localhost:11434, or a self-hosted text-generation-webui).
 # If not set, falls back to no-LLM mode (basic context only, no extraction).
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 
 _LOCAL_LLM_BASE_URL: Optional[str] = None
 _LOCAL_LLM_MODEL: Optional[str] = None
 _LOCAL_LLM_API_KEY: Optional[str] = None
 _LOCAL_LLM_ENABLED: bool = False
+
 
 def _init_local_llm():
     global _LOCAL_LLM_BASE_URL, _LOCAL_LLM_MODEL, _LOCAL_LLM_API_KEY, _LOCAL_LLM_ENABLED
@@ -59,6 +59,7 @@ def _init_local_llm():
                 "LLM extraction will be skipped"
             )
 
+
 _init_local_llm()
 
 def is_local_llm_enabled() -> bool:
@@ -68,6 +69,9 @@ def is_local_llm_enabled() -> bool:
 def get_local_llm_config() -> tuple[str, str, Optional[str]]:
     """Return (base_url, model, api_key) for the local LLM gateway."""
     return (_LOCAL_LLM_BASE_URL or "", _LOCAL_LLM_MODEL or "", _LOCAL_LLM_API_KEY)
+
+
+_llm_cache: Dict[tuple, Any] = {}
 
 def get_local_llm(feature: str) -> Optional[ChatOpenAI]:
     """Get a ChatOpenAI client for LOCAL_MODE pointing at the local gateway.
@@ -108,7 +112,6 @@ def get_local_llm(feature: str) -> Optional[ChatOpenAI]:
 # own AI Studio API key. Platform calls use ChatGoogleGenerativeAI (native SDK).
 _GEMINI_OPENAI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
-
 class _AnthropicClientProxy:
     """Forwards every attribute to the appropriate anthropic.AsyncAnthropic for the request."""
 
@@ -125,7 +128,6 @@ class _AnthropicClientProxy:
 
     def __getattr__(self, name: str):
         return getattr(self._resolve(), name)
-
 
 class _OpenAIEmbeddingsProxy:
     """Transparent proxy for OpenAIEmbeddings that uses BYOK OpenAI when set."""
@@ -151,17 +153,53 @@ class _OpenAIEmbeddingsProxy:
     def __getattr__(self, name: str):
         return getattr(self._resolve(), name)
 
+# --------------------------------------------------------------------------
+# LOCAL_MODE stub — all cloud providers removed for airgap
+# --------------------------------------------------------------------------
 
-_BYOK_CACHE_MAX_SIZE = 256
-_BYOK_CACHE_TTL_SECONDS = 3600  # 1 hour
+_NOT_LOCAL_MODE_MSG = "Cloud LLM providers are disabled in LOCAL_MODE=1 (airgap). Use LOCAL_LLM_BASE_URL."
 
-_openai_cache: TTLCache = TTLCache(maxsize=_BYOK_CACHE_MAX_SIZE, ttl=_BYOK_CACHE_TTL_SECONDS)
-_anthropic_cache: TTLCache = TTLCache(maxsize=_BYOK_CACHE_MAX_SIZE, ttl=_BYOK_CACHE_TTL_SECONDS)
+def _require_cloud_mode():
+    """Raise NotImplementedError if called in LOCAL_MODE."""
+    raise NotImplementedError(_NOT_LOCAL_MODE_MSG)
+
+# These proxy classes are stubbed out — they raise NotImplementedError in LOCAL_MODE
+
+class _StubProxy:
+    """Base proxy that raises NotImplementedError for any access in LOCAL_MODE."""
+
+    __slots__ = ()
+
+    def _require(self):
+        if os.getenv("LOCAL_MODE", "").lower() in ("1", "true", "yes"):
+            raise NotImplementedError(_NOT_LOCAL_MODE_MSG)
+
+    def __getattr__(self, name: str):
+        self._require()
+        raise NotImplementedError(_NOT_LOCAL_MODE_MSG)
+
+    def __or__(self, other):
+        self._require()
+        raise NotImplementedError(_NOT_LOCAL_MODE_MSG)
+
+    def __ror__(self, other):
+        self._require()
+        raise NotImplementedError(_NOT_LOCAL_MODE_MSG)
+
+# BYOK is not applicable in LOCAL_MODE — stub all BYOK-related functions
+def get_byok_key(provider: str):
+    """BYOK is disabled in LOCAL_MODE=1 (airgap). Returns None."""
+    return None
 
 
-def _hash_key(api_key: str) -> str:
-    """Derive a safe cache key from an API key. Never store raw keys in memory."""
-    return hashlib.sha256(api_key.encode()).hexdigest()
+def get_anthropic_client():
+    """Anthropic client is not available in LOCAL_MODE=1 (airgap)."""
+    raise NotImplementedError(_NOT_LOCAL_MODE_MSG)
+
+
+def get_openai_chat(model: str, **kwargs):
+    """OpenAI direct client is not available in LOCAL_MODE=1 (airgap). Use LOCAL_LLM_BASE_URL."""
+    raise NotImplementedError(_NOT_LOCAL_MODE_MSG)
 
 
 def _cached_openai_chat(model: str, api_key: str, ctor_kwargs: Dict[str, Any]) -> ChatOpenAI:
@@ -172,7 +210,6 @@ def _cached_openai_chat(model: str, api_key: str, ctor_kwargs: Dict[str, Any]) -
         _openai_cache[cache_key] = inst
     return inst
 
-
 def _cached_anthropic(api_key: str) -> anthropic.AsyncAnthropic:
     cache_key = _hash_key(api_key)
     inst = _anthropic_cache.get(cache_key)
@@ -180,7 +217,6 @@ def _cached_anthropic(api_key: str) -> anthropic.AsyncAnthropic:
         inst = anthropic.AsyncAnthropic(api_key=api_key)
         _anthropic_cache[cache_key] = inst
     return inst
-
 
 def _create_byok_client(
     model: str, provider: str, byok_key: str, streaming: bool = False, feature: str = ''
@@ -210,16 +246,13 @@ def _create_byok_client(
 
     return None
 
-
 # Anthropic client for chat agent (module-level, BYOK-aware)
 _default_anthropic_client = anthropic.AsyncAnthropic()  # uses ANTHROPIC_API_KEY env var
 anthropic_client = _AnthropicClientProxy(_default_anthropic_client)
 
-
 def get_anthropic_client() -> anthropic.AsyncAnthropic:
     """Kept as a factory for callers that prefer explicit routing over the module proxy."""
     return anthropic_client._resolve()
-
 
 def get_openai_chat(model: str, **kwargs) -> ChatOpenAI:
     """Explicit factory; equivalent to using the module-level proxies."""
@@ -227,7 +260,6 @@ def get_openai_chat(model: str, **kwargs) -> ChatOpenAI:
     if byok:
         return _cached_openai_chat(model, byok, kwargs)
     return ChatOpenAI(model=model, **kwargs)
-
 
 # ---------------------------------------------------------------------------
 # Model QoS Profile System
@@ -422,7 +454,6 @@ _byok_profile = MODEL_QOS_PROFILES[_byok_profile_name]
 _ANTHROPIC_ONLY_FEATURES = {'chat_agent'}
 _PERPLEXITY_ONLY_FEATURES = {'web_search'}
 
-
 # Feature-specific client config (temperature, headers — orthogonal to model choice).
 # Only applied when a feature resolves to an OpenRouter model.
 _OPENROUTER_TEMPERATURES: Dict[str, float] = {
@@ -433,6 +464,19 @@ _OPENROUTER_TEMPERATURES: Dict[str, float] = {
 
 # Models that support OpenAI prompt caching (prompt_cache_key routing).
 _CACHE_KEY_MODELS = {'gpt-5.4', 'gpt-5.4-mini'}
+# --------------------------------------------------------------------------
+# Model QoS Profile System (LOCAL_MODE only)
+#
+# In LOCAL_MODE, all features resolve to the configured LOCAL_LLM_MODEL.
+# Per-feature overrides via MODEL_QOS_<FEATURE> are still honored but the
+# provider is always the local gateway.
+# --------------------------------------------------------------------------
+
+_ACTIVE_PROFILE_NAME = "local"
+
+def _classify_provider(model: str) -> str:
+    """In LOCAL_MODE all models are served via the local OpenAI-compatible gateway."""
+    return "local"
 
 # Features that call .with_structured_output() — logged when resolving to Gemini for compat monitoring.
 _STRUCTURED_OUTPUT_FEATURES = {
@@ -457,7 +501,7 @@ def _get_model_config(feature: str) -> Tuple[str, str]:
 
 
 def get_model(feature: str) -> str:
-    """Get the model name for a feature from the active Model QoS profile.
+    """Get the model name for a feature.
 
     Resolution order: pinned > active profile > fallback.
 
@@ -469,7 +513,6 @@ def get_model(feature: str) -> str:
     """
     return _get_model_config(feature)[0]
 
-
 def get_provider(feature: str) -> str:
     """Get the provider for a feature from the active Model QoS profile.
 
@@ -478,7 +521,6 @@ def get_provider(feature: str) -> str:
     """
     return _get_model_config(feature)[1]
 
-
 # ---------------------------------------------------------------------------
 # Client factories — provider-specific, cached per (model, streaming, provider)
 # Each factory creates and caches a plain ChatOpenAI using Omi's default keys.
@@ -486,7 +528,6 @@ def get_provider(feature: str) -> str:
 # ---------------------------------------------------------------------------
 
 _llm_cache: Dict[tuple, Any] = {}
-
 
 def _get_or_create_openai_llm(model_name: str, streaming: bool = False) -> ChatOpenAI:
     """Get or create a cached ChatOpenAI for an OpenAI model."""
@@ -500,7 +541,6 @@ def _get_or_create_openai_llm(model_name: str, streaming: bool = False) -> ChatO
             kwargs['stream_options'] = {"include_usage": True}
         _llm_cache[key] = ChatOpenAI(model=model_name, **kwargs)
     return _llm_cache[key]
-
 
 def _get_or_create_openrouter_llm(
     model_name: str, streaming: bool = False, temperature: Optional[float] = None
@@ -527,7 +567,6 @@ def _get_or_create_openrouter_llm(
             kwargs['stream_options'] = {"include_usage": True}
         _llm_cache[key] = ChatOpenAI(model=api_model, **kwargs)
     return _llm_cache[key]
-
 
 def _get_or_create_gemini_llm(model_name: str, streaming: bool = False) -> BaseChatModel:
     """Get or create a cached ChatGoogleGenerativeAI for a Gemini model via native SDK.
@@ -569,7 +608,6 @@ def _get_or_create_gemini_llm(model_name: str, streaming: bool = False) -> BaseC
             )
     return _llm_cache[key]
 
-
 def _get_default_client(model: str, provider: str, streaming: bool, feature: str) -> BaseChatModel:
     """Get the cached default client for a model/provider combo."""
     if provider == 'openrouter':
@@ -579,13 +617,11 @@ def _get_default_client(model: str, provider: str, streaming: bool, feature: str
         return _get_or_create_gemini_llm(model, streaming)
     return _get_or_create_openai_llm(model, streaming)
 
-
 def _effective_byok_provider(model: str, provider: str) -> str:
     """Map provider to the actual BYOK key type needed (Gemini-based OpenRouter → Gemini key)."""
     if provider == 'openrouter' and model.startswith('gemini'):
         return 'gemini'
     return provider
-
 
 def get_llm(feature: str, streaming: bool = False, cache_key: Optional[str] = None) -> BaseChatModel:
     """Get the LLM client for a feature based on the active Model QoS profile.
@@ -609,30 +645,28 @@ def get_llm(feature: str, streaming: bool = False, cache_key: Optional[str] = No
 
         llm_stream = get_llm('chat_responses', streaming=True)
         response = llm_stream.invoke(prompt, {'callbacks': callbacks})
+    In LOCAL_MODE: returns LOCAL_LLM_MODEL (or env override MODEL_QOS_<FEATURE>).
+    Raises if LOCAL_MODE is not enabled.
     """
-    # LOCAL_MODE: use local gateway if configured, otherwise return a no-op
-    if _LOCAL_LLM_ENABLED:
-        local_llm = get_local_llm(feature)
-        if local_llm is not None:
-            if streaming:
-                # Return a new streaming-capable instance for this feature
-                model = get_model(feature)
-                key = (model, True, 'local')
-                if key not in _llm_cache:
-                    kwargs: Dict[str, Any] = {
-                        'model': model,
-                        'base_url': _LOCAL_LLM_BASE_URL,
-                        'api_key': _LOCAL_LLM_API_KEY or 'local',
-                        'streaming': True,
-                        'stream_options': {"include_usage": True},
-                    }
-                    _llm_cache[key] = ChatOpenAI(**kwargs)
-                return _llm_cache[key]
-            return local_llm
+    if not _LOCAL_LLM_ENABLED:
+        raise RuntimeError(
+            "LLM is not configured. Set LOCAL_MODE=1 and LOCAL_LLM_BASE_URL / LOCAL_LLM_MODEL."
+        )
+    env_key = f"MODEL_QOS_{feature.upper()}"
+    override = os.environ.get(env_key, "").strip()
+    if override:
+        return override
+    return _LOCAL_LLM_MODEL or "local-model"
 
-    if feature in _ANTHROPIC_ONLY_FEATURES:
-        raise ValueError(
-            f"Feature '{feature}' is Anthropic — use get_model('{feature}') with anthropic_client instead of get_llm()"
+def get_llm(feature: str, streaming: bool = False, cache_key: Optional[str] = None):
+    """Get the LLM client for a feature.
+
+    In LOCAL_MODE: returns a ChatOpenAI client pointing at LOCAL_LLM_BASE_URL.
+    Raises if LOCAL_MODE is not enabled or not configured.
+    """
+    if not _LOCAL_LLM_ENABLED:
+        raise RuntimeError(
+            "LLM is not configured. Set LOCAL_MODE=1 and LOCAL_LLM_BASE_URL / LOCAL_LLM_MODEL."
         )
     if feature in _PERPLEXITY_ONLY_FEATURES:
         raise ValueError(
@@ -681,7 +715,6 @@ def get_llm(feature: str, streaming: bool = False, cache_key: Optional[str] = No
         return result.bind(prompt_cache_key=cache_key)
     return result
 
-
 def get_qos_info() -> Dict[str, Dict[str, str]]:
     """Return full feature→(model, provider) mapping for the active profile (debugging/monitoring)."""
     info: Dict[str, Dict[str, str]] = {}
@@ -692,8 +725,30 @@ def get_qos_info() -> Dict[str, Dict[str, str]]:
             'model': model,
             'profile': _active_profile_name,
             'provider': provider,
+    if streaming:
+        model = get_model(feature)
+        key = (model, True, "local")
+        if key not in _llm_cache:
+            kwargs: Dict[str, Any] = {
+                "model": model,
+                "base_url": _LOCAL_LLM_BASE_URL,
+                "api_key": _LOCAL_LLM_API_KEY or "local",
+                "streaming": True,
+                "stream_options": {"include_usage": True},
+            }
+            _llm_cache[key] = ChatOpenAI(**kwargs)
+        return _llm_cache[key]
+    return get_local_llm(feature)
+
+def get_qos_info() -> Dict[str, Dict[str, str]]:
+    """Return feature→model mapping for the active profile (debugging/monitoring)."""
+    return {
+        "local": {
+            "model": _LOCAL_LLM_MODEL or "unknown",
+            "profile": _ACTIVE_PROFILE_NAME,
+            "provider": "local",
         }
-    return info
+    }
 
 
 # Startup logging — log active profile so cost issues are traceable.
@@ -706,14 +761,17 @@ logger.info('BYOK QoS profile=%s', _byok_profile_name)
 _so_gemini = {f for f in _STRUCTURED_OUTPUT_FEATURES if _active_profile.get(f, _DEFAULT_CONFIG)[1] == 'gemini'}
 if _so_gemini:
     logger.info('Structured output features on Gemini: %s', ', '.join(sorted(_so_gemini)))
+# --------------------------------------------------------------------------
+# Embeddings (LOCAL_MODE uses OpenAI-compatible local embeddings if available)
+# --------------------------------------------------------------------------
+
+_StubEmbeddingsProxy = _StubProxy  # alias for clarity
 
 
-# ---------------------------------------------------------------------------
-# Anthropic — model resolved from active QoS profile
-# ---------------------------------------------------------------------------
-ANTHROPIC_AGENT_MODEL = get_model('chat_agent')
-ANTHROPIC_AGENT_COMPLEX_MODEL = get_model('chat_agent')
+class _LocalEmbeddingsProxy:
+    """Transparent proxy for OpenAIEmbeddings in LOCAL_MODE."""
 
+    __slots__ = ("_model", "_default", "_ctor_kwargs")
 
 # ---------------------------------------------------------------------------
 # Legacy module-level alias (kept for test compatibility).
@@ -733,35 +791,138 @@ embeddings = _OpenAIEmbeddingsProxy(
 parser = PydanticOutputParser(pydantic_object=Structured)
 
 encoding = tiktoken.encoding_for_model('gpt-4')
+    def __init__(self, model: str, default: OpenAIEmbeddings, ctor_kwargs: Dict[str, Any]):
+        object.__setattr__(self, "_model", model)
+        object.__setattr__(self, "_default", default)
+        object.__setattr__(self, "_ctor_kwargs", ctor_kwargs)
+
+    def _resolve(self) -> OpenAIEmbeddings:
+        if not _LOCAL_LLM_ENABLED:
+            return self._default
+        cache_key = f"emb:{self._model}"
+        inst = _openai_cache.get(cache_key)
+        if inst is None:
+            inst = OpenAIEmbeddings(
+                model=self._model,
+                base_url=_LOCAL_LLM_BASE_URL,
+                api_key=_LOCAL_LLM_API_KEY or "local",
+                **self._ctor_kwargs,
+            )
+            _openai_cache[cache_key] = inst
+        return inst
+
+    def __getattr__(self, name: str):
+        return getattr(self._resolve(), name)
+
+_openai_cache: TTLCache = TTLCache(maxsize=256, ttl=3600)
+
+def generate_embedding(content: str) -> List[float]:
+    """Generate an embedding for the given content using the local gateway."""
+    return embeddings.embed_documents([content])[0]
 
 
 def num_tokens_from_string(string: str) -> int:
     """Returns the number of tokens in a text string."""
-    num_tokens = len(encoding.encode(string))
-    return num_tokens
+    encoding = tiktoken.encoding_for_model("gpt-4")
+    return len(encoding.encode(string))
 
 
-def generate_embedding(content: str) -> List[float]:
-    return embeddings.embed_documents([content])[0]
+# --------------------------------------------------------------------------
+# Module-level exports ( stubs / fallbacks for backward compatibility)
+# --------------------------------------------------------------------------
+
+# In LOCAL_MODE the QoS profile is fixed to the local model
+MODEL_QOS_PROFILES: Dict[str, Dict[str, str]] = {
+    "local": {},
+}
+
+_active_profile: Dict[str, str] = {}
+_active_profile_name = "local"
+
+_PINNED_FEATURES: Dict[str, str] = {}
+
+
+# Legacy model instances — stubbed in LOCAL_MODE (raise NotImplementedError on use)
+_llm_cache.clear()  # start fresh; legacy cache not applicable
+
+
+class _StubLLM:
+    """Stub LLM that raises NotImplementedError on any invocation."""
+
+    __slots__ = ("_name",)
+
+    def __init__(self, name: str):
+        object.__setattr__(self, "_name", name)
+
+    def __getattr__(self, name: str):
+        raise NotImplementedError(f"{self._name} is not available in LOCAL_MODE=1 (airgap).")
+
+    def invoke(self, *args, **kwargs):
+        raise NotImplementedError(f"{self._name} is not available in LOCAL_MODE=1 (airgap).")
+
+    def bind(self, *args, **kwargs):
+        raise NotImplementedError(f"{self._name} is not available in LOCAL_MODE=1 (airgap).")
+
+    def bind_tools(self, *args, **kwargs):
+        raise NotImplementedError(f"{self._name} is not available in LOCAL_MODE=1 (airgap).")
+
+    def with_structured_output(self, *args, **kwargs):
+        raise NotImplementedError(f"{self._name} is not available in LOCAL_MODE=1 (airgap).")
+
+    def __or__(self, other):
+        raise NotImplementedError(f"{self._name} is not available in LOCAL_MODE=1 (airgap).")
+
+    def __ror__(self, other):
+        raise NotImplementedError(f"{self._name} is not available in LOCAL_MODE=1 (airgap).")
+
+
+def _make_stub_llm(name: str):
+    return _StubLLM(name)
+
+
+# These were the BYOK-aware cloud LLM proxies; all stubbed out now
+llm_mini = _make_stub_llm("llm_mini")
+llm_mini_stream = _make_stub_llm("llm_mini_stream")
+llm_large = _make_stub_llm("llm_large")
+llm_large_stream = _make_stub_llm("llm_large_stream")
+llm_high = _make_stub_llm("llm_high")
+llm_high_stream = _make_stub_llm("llm_high_stream")
+llm_medium = _make_stub_llm("llm_medium")
+llm_medium_stream = _make_stub_llm("llm_medium_stream")
+llm_medium_experiment = _make_stub_llm("llm_medium_experiment")
+llm_agent = _make_stub_llm("llm_agent")
+llm_agent_stream = _make_stub_llm("llm_agent_stream")
+llm_persona_mini_stream = _make_stub_llm("llm_persona_mini_stream")
+llm_persona_medium_stream = _make_stub_llm("llm_persona_medium_stream")
+llm_gemini_flash = _make_stub_llm("llm_gemini_flash")
+
+# Anthropic agent model — not available in LOCAL_MODE
+ANTHROPIC_AGENT_MODEL: str = ""
+ANTHROPIC_AGENT_COMPLEX_MODEL: str = ""
+
+# embeddings proxy for LOCAL_MODE
+embeddings = _LocalEmbeddingsProxy(
+    model="text-embedding-3-large",
+    default=OpenAIEmbeddings(model="text-embedding-3-large"),
+    ctor_kwargs={},
+)
+parser = PydanticOutputParser(pydantic_object=Structured)
 
 
 def gemini_embed_query(text: str) -> List[float]:
-    """Embed a query using Gemini embedding-001 (3072-dim) for screen activity search.
+    """Gemini embedding is not available in LOCAL_MODE=1 (airgap)."""
+    raise NotImplementedError(_NOT_LOCAL_MODE_MSG)
 
-    Uses RETRIEVAL_QUERY task type to match the RETRIEVAL_DOCUMENT embeddings
-    generated by the desktop app.
 
-    Prefers the per-request BYOK Gemini key; falls back to the process-wide
-    env key so non-BYOK callers behave exactly as before.
-    """
-    api_key = get_byok_key('gemini') or os.environ.get('GEMINI_API_KEY', '')
-    url = 'https://generativelanguage.googleapis.com/v1beta/models/embedding-001:embedContent'
-    payload = {
-        'model': 'models/embedding-001',
-        'content': {'parts': [{'text': text}]},
-        'taskType': 'RETRIEVAL_QUERY',
-    }
-    headers = {'x-goog-api-key': api_key, 'Content-Type': 'application/json'}
-    resp = httpx.post(url, json=payload, headers=headers, timeout=10)
-    resp.raise_for_status()
-    return resp.json()['embedding']['values']
+# Startup logging for LOCAL_MODE
+if _LOCAL_LLM_ENABLED:
+    logger.info(
+        "LOCAL_MODE LLM initialized: base_url=%s model=%s",
+        _LOCAL_LLM_BASE_URL,
+        _LOCAL_LLM_MODEL,
+    )
+else:
+    logger.warning("LOCAL_MODE=1 but no LOCAL_LLM_BASE_URL configured — LLM features disabled")
+
+
+

@@ -59,20 +59,32 @@ from routers import (
 
 from utils.other.timeout import TimeoutMiddleware
 from utils.observability import log_langsmith_status
-from utils.subscription import validate_stripe_price_ids
 from utils.http_client import close_all_clients
+
+LOCAL_MODE = os.getenv("LOCAL_MODE", "").lower() in ("1", "true", "yes")
+
+
+def _stub_validate_stripe_price_ids():
+    """No-op stub for LOCAL_MODE=1 airgap."""
+    pass
+
 
 # Log LangSmith tracing status at startup
 log_langsmith_status()
 
 # Validate Stripe price IDs so misconfigured plans fail loud
+if LOCAL_MODE:
+    validate_stripe_price_ids = _stub_validate_stripe_price_ids
+else:
+    from utils.subscription import validate_stripe_price_ids
+
 validate_stripe_price_ids()
 
-if os.environ.get('SERVICE_ACCOUNT_JSON'):
+if not LOCAL_MODE and os.environ.get('SERVICE_ACCOUNT_JSON'):
     service_account_info = json.loads(os.environ["SERVICE_ACCOUNT_JSON"])
     credentials = firebase_admin.credentials.Certificate(service_account_info)
     firebase_admin.initialize_app(credentials)
-else:
+elif not LOCAL_MODE:
     firebase_admin.initialize_app()
 
 app = FastAPI()
