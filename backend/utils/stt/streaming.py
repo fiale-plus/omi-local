@@ -5,8 +5,6 @@ from enum import Enum
 from typing import Callable, List, Optional
 
 import websockets
-from deepgram import DeepgramClient, DeepgramClientOptions, LiveTranscriptionEvents
-from deepgram.clients.live.v1 import LiveOptions
 
 from utils.byok import get_byok_key
 from utils.stt.safe_socket import KeepaliveConfig, SafeDeepgramSocket  # noqa: F401 — re-exported for backward compat
@@ -15,6 +13,8 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# LOCAL_MODE: cloud STT is disabled, only self-hosted Deepgram allowed
+_LOCAL_MODE = os.getenv("LOCAL_MODE", "").lower() in ("1", "true", "yes")
 
 headers = {"Authorization": f"Token {os.getenv('DEEPGRAM_API_KEY')}", "Content-Type": "audio/*"}
 
@@ -157,27 +157,48 @@ def should_preserve_filler_words(language: str) -> bool:
     """
     return not language.startswith('en')
 
-
 # Initialize Deepgram client based on environment configuration
 is_dg_self_hosted = os.getenv('DEEPGRAM_SELF_HOSTED_ENABLED', '').lower() == 'true'
 deepgram_options = DeepgramClientOptions(options={"termination_exception_connect": "true"})
+# Initialize Deepgram client based on environment configuration.
+# In LOCAL_MODE, cloud STT is disabled — only self-hosted Deepgram is allowed.
+# DEEPGRAM_SELF_HOSTED_ENABLED=true activates the local Deepgram instance.
 
-deepgram_cloud_options = DeepgramClientOptions(options={"termination_exception_connect": "true"})
-deepgram_cloud_options.url = "https://api.deepgram.com"
+is_dg_self_hosted = os.getenv('DEEPGRAM_SELF_HOSTED_ENABLED', '').lower() == 'true'
+
+deepgram = None
+deepgram_beta = None
+deepgram_options = None
+deepgram_cloud_options = None
 
 if is_dg_self_hosted:
+    from deepgram import DeepgramClient, DeepgramClientOptions
+    from deepgram.clients.live.v1 import LiveOptions
+
+    deepgram_options = DeepgramClientOptions(options={"termination_exception_connect": "true"})
+    deepgram_cloud_options = DeepgramClientOptions(options={"termination_exception_connect": "true"})
+
     dg_self_hosted_url = os.getenv('DEEPGRAM_SELF_HOSTED_URL')
     if not dg_self_hosted_url:
         raise ValueError("DEEPGRAM_SELF_HOSTED_URL must be set when DEEPGRAM_SELF_HOSTED_ENABLED is true")
-    # Override only the URL while keeping all other options
     deepgram_options.url = dg_self_hosted_url
     deepgram_cloud_options.url = dg_self_hosted_url
     logger.info(f"Using Deepgram self-hosted at: {dg_self_hosted_url}")
 
-deepgram = DeepgramClient(os.getenv('DEEPGRAM_API_KEY'), deepgram_options)
+    deepgram = DeepgramClient(os.getenv('DEEPGRAM_API_KEY'), deepgram_options)
+    deepgram_beta = DeepgramClient(os.getenv('DEEPGRAM_API_KEY'), deepgram_cloud_options)
+elif _LOCAL_MODE:
+    logger.info("LOCAL_MODE: Deepgram cloud STT is disabled. Use local STT (faster-whisper).")
+else:
+    # Cloud Deepgram (non-LOCAL_MODE, non-self-hosted)
+    from deepgram import DeepgramClient, DeepgramClientOptions
+    from deepgram.clients.live.v1 import LiveOptions
 
-# unused fn
-deepgram_beta = DeepgramClient(os.getenv('DEEPGRAM_API_KEY'), deepgram_cloud_options)
+    deepgram_options = DeepgramClientOptions(options={"termination_exception_connect": "true"})
+    deepgram_cloud_options = DeepgramClientOptions(options={"termination_exception_connect": "true"})
+    deepgram_cloud_options.url = "https://api.deepgram.com"
+    deepgram = DeepgramClient(os.getenv('DEEPGRAM_API_KEY'), deepgram_options)
+    deepgram_beta = DeepgramClient(os.getenv('DEEPGRAM_API_KEY'), deepgram_cloud_options)
 
 
 async def process_audio_dg(
@@ -192,11 +213,21 @@ async def process_audio_dg(
 ):
     """Create a Deepgram streaming connection.
 
+    In LOCAL_MODE without DEEPGRAM_SELF_HOSTED_ENABLED, this raises NotImplementedError.
+    Use local STT (faster-whisper) via utils.stt.local_stt instead.
+
     Args:
         vad_gate: Optional VADStreamingGate. If provided, returns a
             GatedDeepgramSocket that handles VAD gating internally and
             remaps timestamps in the stream_transcript callback.
     """
+    if deepgram is None:
+        raise NotImplementedError(
+            "Deepgram streaming is not available in LOCAL_MODE without DEEPGRAM_SELF_HOSTED_ENABLED=true. "
+            "Use utils.stt.local_stt.transcribe_pcm_with_local_stt() or "
+            "utils.stt.local_listen.LocalListenSession for local transcription."
+        )
+
     logger.info(f'process_audio_dg {language} {sample_rate} {channels}')
 
     # If gate provided, wrap stream_transcript to remap DG timestamps
@@ -268,6 +299,8 @@ async def process_audio_dg(
         logger.warning('Deepgram error (close-reason capture): %s', error)
         safe_conn.set_close_reason(reason)
 
+    # LiveTranscriptionEvents is only available when deepgram module is loaded
+    from deepgram import LiveTranscriptionEvents
     dg_connection.on(LiveTranscriptionEvents.Close, on_dg_close)
     dg_connection.on(LiveTranscriptionEvents.Error, on_dg_error)
 
@@ -322,7 +355,8 @@ async def connect_to_deepgram_with_backoff(
     raise Exception(f'Could not open socket: All retry attempts failed.')
 
 
-def _dg_keywords_set(options: LiveOptions, keywords: List[str]):
+def _dg_keywords_set(options, keywords: List[str]):
+    """Set keywords on a LiveOptions object (type depends on available deepgram version)."""
     if options.model in ['nova-3']:
         options.keyterm = keywords
         return options
@@ -331,17 +365,26 @@ def _dg_keywords_set(options: LiveOptions, keywords: List[str]):
     return options
 
 
-def _deepgram_client_for_request() -> DeepgramClient:
+def _deepgram_client_for_request():
     """Return a Deepgram client keyed to the current request's BYOK Deepgram key.
 
     BYOK users pay Deepgram directly — we don't want to rack up minutes on the
     Omi Deepgram account for them. Self-hosted Deepgram ignores BYOK since
     there's no per-user billing concept there.
+
+    Raises:
+        RuntimeError: If Deepgram is not initialized (LOCAL_MODE without self-hosted).
     """
+    if deepgram is None:
+        raise RuntimeError(
+            "Deepgram is not initialized. In LOCAL_MODE, set DEEPGRAM_SELF_HOSTED_ENABLED=true "
+            "to use Deepgram streaming, or use local STT via utils.stt.local_stt."
+        )
     if is_dg_self_hosted:
         return deepgram
     byok = get_byok_key('deepgram')
     if byok:
+        from deepgram import DeepgramClient
         return DeepgramClient(byok, deepgram_cloud_options)
     return deepgram
 
@@ -349,6 +392,20 @@ def _deepgram_client_for_request() -> DeepgramClient:
 def connect_to_deepgram(
     on_message, on_error, language: str, sample_rate: int, channels: int, model: str, keywords: List[str] = []
 ):
+    """Establish a Deepgram WebSocket connection for streaming STT.
+
+    Raises:
+        RuntimeError: If Deepgram is not initialized.
+    """
+    from deepgram import DeepgramClient, LiveTranscriptionEvents
+    from deepgram.clients.live.v1 import LiveOptions
+
+    if deepgram is None:
+        raise RuntimeError(
+            "Deepgram is not initialized. In LOCAL_MODE, set DEEPGRAM_SELF_HOSTED_ENABLED=true "
+            "to use Deepgram streaming, or use local STT via utils.stt.local_stt."
+        )
+
     try:
         dg_connection = _deepgram_client_for_request().listen.websocket.v("1")
         dg_connection.on(LiveTranscriptionEvents.Transcript, on_message)

@@ -4,8 +4,6 @@ from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from typing import List
 
-from pinecone import Pinecone
-
 from utils.llm.clients import embeddings
 import logging
 
@@ -16,11 +14,14 @@ logger = logging.getLogger(__name__)
 # -----------------------------------------------------------------------------
 _LOCAL_MODE = os.getenv("LOCAL_MODE", "").lower() in ("1", "true", "yes")
 
-if not _LOCAL_MODE and os.getenv('PINECONE_API_KEY') is not None:
-    pc = Pinecone(api_key=os.getenv('PINECONE_API_KEY', ''))
-    index = pc.Index(os.getenv('PINECONE_INDEX_NAME', ''))
-else:
-    index = None
+# Pinecone is only imported when not in LOCAL_MODE (cloud-only dependency)
+index = None
+if not _LOCAL_MODE:
+    from pinecone import Pinecone
+
+    if os.getenv('PINECONE_API_KEY') is not None:
+        pc = Pinecone(api_key=os.getenv('PINECONE_API_KEY', ''))
+        index = pc.Index(os.getenv('PINECONE_INDEX_NAME', ''))
 
 # Lazy import to avoid hard dependency when not in LOCAL_MODE
 _local_fts = None

@@ -1,10 +1,8 @@
 import os
 from collections import defaultdict
-from io import BytesIO
 from typing import List, Optional, Sequence, Tuple, Union
 
 import fal_client
-from deepgram import DeepgramClient, DeepgramClientOptions
 
 from models.transcript_segment import TranscriptSegment
 from utils.byok import get_byok_key
@@ -13,21 +11,13 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Initialize Deepgram client for pre-recorded transcription
-# WARN: the pre-recorded transcription is available on deepgram cloud
-_deepgram_options = DeepgramClientOptions(options={"keepalive": "true"})
-_deepgram_client = DeepgramClient(os.getenv('DEEPGRAM_API_KEY'), _deepgram_options)
+# LOCAL_MODE: Cloud STT (Deepgram) is not available.
+# For local transcription, use utils.stt.local_stt.transcribe_pcm_with_local_stt
+# or utils.stt.local_listen.LocalListenSession instead.
 
 
-def _deepgram_client_for_request() -> DeepgramClient:
-    """Route to BYOK Deepgram key when set; otherwise use the process-wide client."""
-    byok = get_byok_key('deepgram')
-    if byok:
-        return DeepgramClient(byok, _deepgram_options)
-    return _deepgram_client
+# Languages supported by nova-3 (only used for fal_whisperx, not Deepgram)
 
-
-# Languages supported by nova-3
 _deepgram_nova3_languages = {
     "ar",
     "ar-AE",
@@ -121,22 +111,23 @@ def get_deepgram_model_for_language(language: str) -> Tuple[str, str]:
     """
     Determine the appropriate Deepgram model and language for pre-recorded transcription.
 
+    NOTE: This is deprecated in LOCAL_MODE — Deepgram cloud is not available.
+    Use local transcription via utils.stt.local_stt instead.
+
     Args:
         language: The requested language code or 'multi' for auto-detection
 
     Returns:
         Tuple of (language_to_use, model_name)
+
+    Raises:
+        NotImplementedError: Always, since Deepgram cloud is unavailable in LOCAL_MODE.
     """
-    # For multi-language mode
-    if language == 'multi':
-        return 'multi', 'nova-3'
-
-    # Languages supported by nova-3
-    if language in _deepgram_nova3_languages:
-        return language, 'nova-3'
-
-    # Unsupported language - fall back to multi for auto-detection
-    return 'multi', 'nova-3'
+    raise NotImplementedError(
+        "deepgram_prerecorded is not available in LOCAL_MODE. "
+        "Use utils.stt.local_stt.transcribe_pcm_with_local_stt() or "
+        "utils.stt.local_stt.transcribe_wav_bytes_with_local_stt() instead."
+    )
 
 
 @timeit
@@ -152,103 +143,15 @@ def deepgram_prerecorded(
 ) -> Union[List[dict], Tuple[List[dict], str]]:
     """
     Transcribe audio using Deepgram's pre-recorded API.
-    Returns words in same format as fal_whisperx for compatibility with existing postprocessing.
 
-    Args:
-        audio_url: URL to the audio file
-        speakers_count: Hint for number of speakers (not used by Deepgram, kept for API compatibility)
-        attempts: Current retry attempt number
-        return_language: If True, returns (words, language) tuple
-        language: Language code to force, or 'multi' for multilingual auto-detection
-        diarize: If True, enable speaker diarization
-        keywords: Custom vocabulary words to boost transcription accuracy
-
-    Returns:
-        List of word dicts with format: {'timestamp': [start, end], 'speaker': 'SPEAKER_XX', 'text': 'word'}
-        Or tuple of (words, language) if return_language=True
+    NOTE: Not available in LOCAL_MODE — stubs raise NotImplementedError.
+    For local transcription, use utils.stt.local_stt.transcribe_* instead.
     """
-    logger.info(f'deepgram_prerecorded {audio_url} {speakers_count} {attempts}')
-
-    try:
-        # 'multi' language means auto-detection
-        is_multi = language == 'multi'
-        should_detect_language = return_language or is_multi
-        options = {
-            "model": model,
-            "smart_format": True,
-            "punctuate": True,
-            "diarize": diarize,
-            "detect_language": should_detect_language,
-            "utterances": True,
-        }
-        if language and not is_multi:
-            options["language"] = language
-
-        if keywords:
-            if model in ('nova-3',):
-                options["keyterm"] = list(keywords)
-            else:
-                options["keywords"] = list(keywords)
-
-        response = _deepgram_client_for_request().listen.rest.v("1").transcribe_url({"url": audio_url}, options)
-
-        # Extract words from response
-        result = response.to_dict()
-        channels = result.get('results', {}).get('channels', [])
-        if not channels:
-            raise Exception('No channels found in response')
-
-        alternatives = channels[0].get('alternatives', [])
-        if not alternatives:
-            raise Exception('No alternatives found in response')
-
-        dg_words = alternatives[0].get('words', [])
-        if not dg_words:
-            if return_language:
-                detected_lang = channels[0].get('detected_language', 'en')
-                if detected_lang and '-' in detected_lang:
-                    detected_lang = detected_lang.split('-')[0]
-                return [], detected_lang or 'en'
-            return []
-
-        # Convert Deepgram format to fal_whisperx compatible format
-        # Deepgram: {word, start, end, confidence, punctuated_word, speaker (int)}
-        # Expected: {timestamp: [start, end], speaker: 'SPEAKER_XX', text: 'word'}
-        words = []
-        for w in dg_words:
-            speaker_id = w.get('speaker', 0)
-            words.append(
-                {
-                    'timestamp': [w['start'], w['end']],
-                    'speaker': f"SPEAKER_{speaker_id:02d}" if speaker_id is not None else None,
-                    'text': w.get('punctuated_word', w['word']),
-                }
-            )
-
-        if return_language:
-            # Deepgram returns detected_language in the channel
-            detected_lang = channels[0].get('detected_language', 'en')
-            # Normalize language code (Deepgram might return 'en-US', we want 'en')
-            if detected_lang and '-' in detected_lang:
-                detected_lang = detected_lang.split('-')[0]
-            return words, detected_lang or 'en'
-
-        return words
-
-    except Exception as e:
-        logger.error(f'Deepgram prerecorded error: {e}')
-        if attempts < 2:
-            return deepgram_prerecorded(
-                audio_url,
-                speakers_count,
-                attempts + 1,
-                return_language,
-                diarize,
-                language,
-                model,
-                keywords,
-            )
-        raise RuntimeError(f'Deepgram transcription failed after {attempts + 1} attempts: {e}')
+    raise NotImplementedError(
+        "deepgram_prerecorded is not available in LOCAL_MODE. "
+        "Use utils.stt.local_stt.transcribe_pcm_with_local_stt() or "
+        "utils.stt.local_stt.transcribe_wav_bytes_with_local_stt() instead."
+    )
 
 
 @timeit
@@ -266,7 +169,6 @@ def deepgram_prerecorded_from_bytes(
 ) -> Union[List[dict], Tuple[List[dict], str]]:
     """
     Transcribe audio bytes using Deepgram's pre-recorded API.
-    Returns words with speaker labels when diarize=True.
 
     Supports both WAV format (default) and raw PCM audio.
     For raw PCM, pass encoding='linear16' with appropriate sample_rate and channels.
@@ -286,9 +188,13 @@ def deepgram_prerecorded_from_bytes(
     Returns:
         List of word dicts with format: {'timestamp': [start, end], 'speaker': 'SPEAKER_XX', 'text': 'word'}
         Or tuple of (words, language) if return_language=True
+    NOTE: Not available in LOCAL_MODE — stubs raise NotImplementedError.
+    For local transcription, use utils.stt.local_stt.transcribe_* instead.
     """
-    logger.info(
-        f'deepgram_prerecorded_from_bytes bytes_len={len(audio_bytes)} {sample_rate} {diarize} {attempts} encoding={encoding} language={language} model={model}'
+    raise NotImplementedError(
+        "deepgram_prerecorded_from_bytes is not available in LOCAL_MODE. "
+        "Use utils.stt.local_stt.transcribe_pcm_with_local_stt() or "
+        "utils.stt.local_stt.transcribe_wav_bytes_with_local_stt() instead."
     )
 
     try:
