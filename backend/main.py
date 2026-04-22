@@ -14,7 +14,6 @@ from fastapi import FastAPI
 from routers import (
     chat,
     firmware,
-    transcribe,
     notifications,
     speech_profile,
     agents,
@@ -78,7 +77,6 @@ else:
 
 app = FastAPI()
 
-app.include_router(transcribe.router)
 app.include_router(conversations.router)
 app.include_router(action_items.router)
 app.include_router(task_integrations.router)
