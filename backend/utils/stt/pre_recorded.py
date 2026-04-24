@@ -2,7 +2,15 @@ import os
 from collections import defaultdict
 from typing import List, Optional, Sequence, Tuple, Union
 
-import fal_client
+# fal.ai client — network call, not available in LOCAL_MODE
+_LOCAL_MODE = os.getenv("LOCAL_MODE", "").lower() in ("1", "true", "yes")
+if _LOCAL_MODE:
+    fal_client = None
+else:
+    try:
+        import fal_client
+    except ImportError:
+        fal_client = None
 
 from models.transcript_segment import TranscriptSegment
 from utils.byok import get_byok_key
@@ -298,6 +306,11 @@ def fal_whisperx(
     diarize: bool = True,
     chunk_level: str = 'word',
 ) -> List[dict]:
+    if fal_client is None:
+        raise NotImplementedError(
+            "fal_whisperx is not available in LOCAL_MODE (fal.ai cloud STT). "
+            "Use local STT via faster-whisper instead."
+        )
     logger.info(f'fal_whisperx {audio_url} {speakers_count} {attempts}')
 
     try:

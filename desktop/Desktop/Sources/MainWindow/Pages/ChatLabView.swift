@@ -250,7 +250,17 @@ class ChatLabViewModel: ObservableObject {
             let authHeader = try await AuthService.shared.getAuthHeader()
 
             // Fetch messages with ratings from the last 60 days
-            let baseURL = await APIClient.shared.baseURL
+            // In LOCAL_MODE, use local backend URL instead of production.
+            // Falls back to empty results if no local transcription backend is configured.
+            let baseURL: String
+            if let envURL = getenv("OMI_PYTHON_API_URL"), let url = String(validatingUTF8: envURL), !url.isEmpty {
+              baseURL = url.hasSuffix("/") ? url : url + "/"
+            } else if ProcessInfo.processInfo.environment["LOCAL_MODE"] == "1" {
+              // LOCAL_MODE with no explicit URL — skip remote call
+              return []
+            } else {
+              baseURL = await APIClient.shared.baseURL
+            }
             let url = URL(string: "\(baseURL)v2/messages?limit=500")!
             var request = URLRequest(url: url)
             request.setValue(authHeader, forHTTPHeaderField: "Authorization")
