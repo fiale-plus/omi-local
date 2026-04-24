@@ -8,8 +8,14 @@ load_dotenv()  # No-op if .env doesn't exist (production); loads local dev secre
 
 logging.basicConfig(level=logging.INFO)
 
-# firebase_admin imported conditionally — only needed in cloud mode
 from fastapi import FastAPI
+
+LOCAL_MODE = os.getenv("LOCAL_MODE", "").lower() in ("1", "true", "yes")
+
+# --- LOCAL_MODE: import-safe router loading ---
+# Cloud-only routers (oauth, auth, transcribe) import firebase_admin at the top level.
+# In LOCAL_MODE, firebase_admin may not be installed, so we skip them entirely.
+# Local-safe routers are always imported; cloud-only routers are gated.
 
 from routers import (
     chat,
@@ -21,20 +27,13 @@ from routers import (
     trends,
     sync,
     apps,
-    payment,
     integration,
     conversations,
     memories,
-    mcp,
-    mcp_sse,
-    oauth,
-    auth,
     action_items,
     task_integrations,
     integrations,
     other,
-    developer,
-    updates,
     calendar_meetings,
     imports,
     knowledge_graph,
@@ -42,8 +41,6 @@ from routers import (
     folders,
     goals,
     announcements,
-    phone_calls,
-    agent_tools,
     tools,
     metrics,
     fair_use_admin,
@@ -57,11 +54,31 @@ from routers import (
 )
 )
 
+# Cloud-only routers — only importable when firebase_admin is available
+_cloud_routers_ok = True
+if not LOCAL_MODE:
+    try:
+        from routers import (
+            payment,
+            mcp,
+            mcp_sse,
+            developer,
+            oauth,
+            auth,
+            transcribe,
+            phone_calls,
+            agent_tools,
+            updates,
+        )
+    except ImportError as e:
+        logging.getLogger(__name__).warning("Could not import cloud-only routers: %s", e)
+        _cloud_routers_ok = False
+else:
+    _cloud_routers_ok = False
+
 from utils.other.timeout import TimeoutMiddleware
 from utils.observability import log_langsmith_status
 from utils.http_client import close_all_clients
-
-LOCAL_MODE = os.getenv("LOCAL_MODE", "").lower() in ("1", "true", "yes")
 
 
 def _stub_validate_stripe_price_ids():
@@ -80,19 +97,7 @@ else:
 
 validate_stripe_price_ids()
 
-# Cloud-only routers — gate behind LOCAL_MODE so they fail loudly instead of silently routing to remote
-if not LOCAL_MODE:
-    app.include_router(phone_calls.router)
-    app.include_router(agent_tools.router)
-    app.include_router(updates.router)
-else:
-    # Stub: re-register routers that hit cloud-only services so they return explicit errors
-    from routers import phone_calls, agent_tools, updates
-    import logging
-    logger = logging.getLogger(__name__)
-    logger.warning("LOCAL_MODE=1: phone_calls, agent_tools, and updates routers are disabled (cloud-only)")
-    del phone_calls, agent_tools, updates  # not actually used further
-
+# Firebase initialization — only in cloud mode
 if not LOCAL_MODE:
     import firebase_admin
     if os.environ.get('SERVICE_ACCOUNT_JSON'):
@@ -105,6 +110,7 @@ if not LOCAL_MODE:
 
 app = FastAPI()
 
+# --- Always-available routers (work in both LOCAL_MODE and cloud) ---
 app.include_router(conversations.router)
 app.include_router(action_items.router)
 app.include_router(task_integrations.router)
@@ -112,28 +118,16 @@ app.include_router(integrations.router)
 app.include_router(memories.router)
 app.include_router(chat.router)
 app.include_router(speech_profile.router)
-# app.include_router(screenpipe.router)
 app.include_router(notifications.router)
 app.include_router(integration.router)
 app.include_router(agents.router)
 app.include_router(users.router)
 app.include_router(trends.router)
-
 app.include_router(other.router)
-
 app.include_router(firmware.router)
 app.include_router(sync.router)
-
 app.include_router(apps.router)
 app.include_router(calendar_meetings.router)
-app.include_router(oauth.router)  # Added oauth router (for Omi Apps)
-app.include_router(auth.router)  # Added auth router (for the main Omi App, this is the core auth router)
-
-
-app.include_router(payment.router)
-app.include_router(mcp.router)
-app.include_router(mcp_sse.router)
-app.include_router(developer.router)
 app.include_router(imports.router)
 app.include_router(wrapped.router)
 app.include_router(folders.router)
@@ -151,6 +145,24 @@ app.include_router(scores.router)
 app.include_router(tts.router)
 app.include_router(local_listen.router)
 
+# --- Cloud-only routers (require firebase_admin, Stripe, etc.) ---
+if _cloud_routers_ok:
+    app.include_router(oauth.router)
+    app.include_router(auth.router)
+    app.include_router(payment.router)
+    app.include_router(mcp.router)
+    app.include_router(mcp_sse.router)
+    app.include_router(developer.router)
+    app.include_router(phone_calls.router)
+    app.include_router(agent_tools.router)
+    app.include_router(updates.router)
+    app.include_router(transcribe.router)
+else:
+    logging.getLogger(__name__).info(
+        "LOCAL_MODE=1 or cloud deps unavailable — oauth, auth, payment, mcp, developer, "
+        "phone_calls, agent_tools, updates, transcribe routers are disabled"
+    )
+
 
 methods_timeout = {
     "GET": os.environ.get('HTTP_GET_TIMEOUT'),
@@ -164,7 +176,8 @@ app.add_middleware(TimeoutMiddleware, methods_timeout=methods_timeout)
 
 from utils.byok import BYOKMiddleware
 
-app.add_middleware(BYOKMiddleware)
+if not LOCAL_MODE:
+    app.add_middleware(BYOKMiddleware)
 
 
 @app.on_event("shutdown")
