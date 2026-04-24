@@ -4,7 +4,6 @@ from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from typing import List
 
-from utils.llm.clients import embeddings
 import logging
 
 logger = logging.getLogger(__name__)
@@ -25,6 +24,7 @@ if not _LOCAL_MODE:
 
 # Lazy import to avoid hard dependency when not in LOCAL_MODE
 _local_fts = None
+_embeddings = None
 
 
 def _get_local_fts():
@@ -37,6 +37,14 @@ def _get_local_fts():
             logger.warning(f"local_fts unavailable: {e}")
             _local_fts = None
     return _local_fts
+
+
+def _get_embeddings():
+    global _embeddings
+    if _embeddings is None:
+        from utils.llm.clients import embeddings as _em
+        _embeddings = _em
+    return _embeddings
 
 
 def _get_data(uid: str, conversation_id: str, vector: List[float]):
@@ -101,7 +109,7 @@ def query_vectors(query: str, uid: str, starts_at: int = None, ends_at: int = No
     if starts_at is not None:
         filter_data['created_at'] = {'$gte': starts_at, '$lte': ends_at}
 
-    xq = embeddings.embed_query(query)
+    xq = _get_embeddings().embed_query(query)
     xc = index.query(vector=xq, top_k=k, include_metadata=False, filter=filter_data, namespace="ns1")
     return [item['id'].replace(f'{uid}-', '') for item in xc['matches']]
 

@@ -102,6 +102,9 @@ class TranscriptionService {
     /// Python backend base URL for transcription endpoints.
     /// Resolution order: beta release channel → OMI_PYTHON_API_URL → https://api.omi.me/
     /// NOTE: Do NOT fall back to OMI_DESKTOP_API_URL — that points to the Rust desktop-backend
+    /// Resolution order: OMI_PYTHON_API_URL → explicit failure (no silent fallback).
+    /// In LOCAL_MODE=1 the URL MUST be explicitly configured — no production fallback.
+    /// NOTE: Do NOT fall back to OMI_API_URL — that points to the Rust desktop-backend
     /// (Cloud Run), which does not have /v2/voice-message/* or /v4/listen endpoints.
     private static let pythonBackendBaseURL: String = DesktopBackendEnvironment.pythonBaseURL()
 
@@ -139,6 +142,10 @@ class TranscriptionService {
         }
         return result
     }
+        // No silent fallback — must have explicit local URL in LOCAL_MODE=1
+        NSLog("TranscriptionService: OMI_PYTHON_API_URL not set — transcription will fail. Set OMI_PYTHON_API_URL in .env for LOCAL_MODE=1")
+        return ""
+    }()
 
     // Reconnection (internal for @testable import)
     var reconnectAttempts = 0

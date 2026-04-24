@@ -66,14 +66,25 @@ fi
 # ─── Local Mode ─────────────────────────────────────────────────────
 # Fully local dev without starting any services. The app uses the
 # OMI_API_URL, OMI_AUTH_URL, and OMI_PYTHON_API_URL values directly.
+# IMPORTANT: No production endpoints are contacted in this mode.
+# All URLs must be explicitly set in .env — no silent fallbacks exist.
 if [ "${LOCAL_MODE:-0}" = "1" ]; then
     echo ""
     echo "=========================================="
-    echo "  LOCAL MODE — using URLs from .env"
+    echo "  LOCAL MODE — local URLs from .env only"
     echo "=========================================="
     echo ""
     echo "  Skipping: Rust backend, Python auth, Cloudflare tunnel"
-    echo "  Using OMI_API_URL=${OMI_API_URL:-http://localhost:10201}"
+    echo "  Firebase: bypassed (AuthService uses stored tokens)"
+    echo "  API calls: MUST use explicit OMI_PYTHON_API_URL"
+    echo "  Production endpoints: NOT contacted (no silent fallback)"
+    echo ""
+    echo "  OMI_API_URL=${OMI_API_URL:-<not set>}"
+    echo "  OMI_AUTH_URL=${OMI_AUTH_URL:-<not set>}"
+    echo "  OMI_PYTHON_API_URL=${OMI_PYTHON_API_URL:-<not set>}"
+    echo ""
+    echo "  If OMI_PYTHON_API_URL is unset, run.sh will EXIT with an error"
+    echo "  rather than silently falling back to api.omi.me"
     echo ""
     echo "=========================================="
     echo ""
@@ -565,9 +576,17 @@ if ! grep -q "^OMI_PYTHON_API_URL=" "$APP_BUNDLE/Contents/Resources/.env"; then
     if [ -z "$PYTHON_API_URL" ] && [ -f "$BACKEND_DIR/.env" ]; then
         PYTHON_API_URL=$(grep "^OMI_PYTHON_API_URL=" "$BACKEND_DIR/.env" | head -1 | cut -d= -f2-)
     fi
+    # In LOCAL_MODE=1, require explicit OMI_PYTHON_API_URL — no silent production fallback
     if [ -z "$PYTHON_API_URL" ]; then
-        PYTHON_API_URL="https://api.omi.me"
-        substep "OMI_PYTHON_API_URL not set — defaulting to production: $PYTHON_API_URL"
+        if [ "${LOCAL_MODE:-0}" = "1" ]; then
+            echo "ERROR: LOCAL_MODE=1 requires OMI_PYTHON_API_URL to be explicitly set."
+            echo "       The app must not contact production endpoints when LOCAL_MODE=1."
+            echo "       Set OMI_PYTHON_API_URL in desktop/Backend-Rust/.env"
+            exit 1
+        else
+            PYTHON_API_URL="https://api.omi.me"
+            substep "OMI_PYTHON_API_URL not set — defaulting to production: $PYTHON_API_URL"
+        fi
     fi
     echo "OMI_PYTHON_API_URL=$PYTHON_API_URL" >> "$APP_BUNDLE/Contents/Resources/.env"
     substep "Set OMI_PYTHON_API_URL=$PYTHON_API_URL"

@@ -12,6 +12,28 @@ if _LOCAL_MODE:
     # Stub: local SQLite layer handles chat sessions
     BATCH_LIMIT = 500
 
+    # Stub decorators — used by cloud-mode functions that aren't called in local mode,
+    # but whose decorator expressions are evaluated at import time.
+    def _nop_decorator(*args, **kwargs):
+        def _inner(f):
+            return f
+        return _inner
+
+    set_data_protection_level = _nop_decorator
+    prepare_for_write = _nop_decorator
+    prepare_for_read = _nop_decorator
+
+    from models.chat import Message  # needed by cloud-mode stubs below
+
+    # Stub helper used by cloud-mode decorators (decorators evaluate args at definition time)
+    def _prepare_data_for_write(data: Dict[str, Any], uid: str, level: str) -> Dict[str, Any]:
+        return data
+
+    def _prepare_message_for_read(
+        message_data: Optional[Dict[str, Any]], uid: str
+    ) -> Optional[Dict[str, Any]]:
+        return message_data
+
     def _encrypt_chat_data(chat_data: Dict[str, Any], uid: str) -> Dict[str, Any]:
         return chat_data
 

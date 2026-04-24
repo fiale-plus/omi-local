@@ -7,6 +7,31 @@ import os
 _LOCAL_MODE = os.getenv("LOCAL_MODE", "").lower() in ("1", "true", "yes")
 
 if _LOCAL_MODE:
+    from typing import Callable
+    from functools import wraps
+
+    # No-op stubs so decorators don't NameError when applied to class definitions
+    def prepare_for_read(decrypt_func: Callable = lambda d, u: d):
+        def decorator(fn):
+            @wraps(fn)
+            def wrapper(*args, **kwargs):
+                return fn(*args, **kwargs)
+            return wrapper
+        return decorator
+
+    def prepare_for_write(data_arg_name: str = "", prepare_func: Callable = lambda d, u, l: d):
+        def decorator(fn):
+            @wraps(fn)
+            def wrapper(*args, **kwargs):
+                return fn(*args, **kwargs)
+            return wrapper
+        return decorator
+
+    def set_data_protection_level(data_arg_name: str):
+        def decorator(fn):
+            return fn
+        return decorator
+
     memories_collection = "memories"
     users_collection = "users"
 

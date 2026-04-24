@@ -40,8 +40,11 @@ async fn get_memories(
         query.include_dismissed
     );
 
-    match state
-        .firestore
+    let firestore = state.firestore().map_err(|_| {
+        (StatusCode::SERVICE_UNAVAILABLE, "Firestore not available in local mode".to_string())
+    })?;
+
+    match firestore
         .get_memories_filtered(
             &user.uid,
             query.limit,

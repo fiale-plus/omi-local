@@ -12,7 +12,24 @@ _LOCAL_MODE = os.getenv("LOCAL_MODE", "").lower() in ("1", "true", "yes")
 
 if _LOCAL_MODE:
     # Stub: local SQLite layer is handled by local_db.py and local_fts.py
-    conversations_collection = "conversations"
+    conversations_collection = "conversation_photos"
+
+    from models.conversation_photo import ConversationPhoto  # needed for type hints in stubs below
+    from models.audio_file import AudioFile  # needed for type hints in stubs below
+    from models.conversation_enums import PostProcessingStatus, PostProcessingModel  # needed for cloud-only function defaults
+    from models.transcript_segment import TranscriptSegment  # needed for cloud-only function signatures
+    from utils.other import hume  # needed for cloud-only function signatures
+
+    # Stub decorators for local mode
+    def _nop_decorator(*args, **kwargs):
+        def _inner(f):
+            return f
+        return _inner
+
+    set_data_protection_level = _nop_decorator
+    prepare_for_write = _nop_decorator
+    prepare_for_read = _nop_decorator
+    with_photos = _nop_decorator
 
     def _ensure_timezone_aware(dt: datetime) -> datetime:
         if dt.tzinfo is None:

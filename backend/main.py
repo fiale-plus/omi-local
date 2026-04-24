@@ -8,7 +8,7 @@ load_dotenv()  # No-op if .env doesn't exist (production); loads local dev secre
 
 logging.basicConfig(level=logging.INFO)
 
-import firebase_admin
+# firebase_admin imported conditionally — only needed in cloud mode
 from fastapi import FastAPI
 
 from routers import (
@@ -80,12 +80,28 @@ else:
 
 validate_stripe_price_ids()
 
-if not LOCAL_MODE and os.environ.get('SERVICE_ACCOUNT_JSON'):
-    service_account_info = json.loads(os.environ["SERVICE_ACCOUNT_JSON"])
-    credentials = firebase_admin.credentials.Certificate(service_account_info)
-    firebase_admin.initialize_app(credentials)
-elif not LOCAL_MODE:
-    firebase_admin.initialize_app()
+# Cloud-only routers — gate behind LOCAL_MODE so they fail loudly instead of silently routing to remote
+if not LOCAL_MODE:
+    app.include_router(phone_calls.router)
+    app.include_router(agent_tools.router)
+    app.include_router(updates.router)
+else:
+    # Stub: re-register routers that hit cloud-only services so they return explicit errors
+    from routers import phone_calls, agent_tools, updates
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.warning("LOCAL_MODE=1: phone_calls, agent_tools, and updates routers are disabled (cloud-only)")
+    del phone_calls, agent_tools, updates  # not actually used further
+
+if not LOCAL_MODE:
+    import firebase_admin
+    if os.environ.get('SERVICE_ACCOUNT_JSON'):
+        service_account_info = json.loads(os.environ["SERVICE_ACCOUNT_JSON"])
+        credentials = firebase_admin.credentials.Certificate(service_account_info)
+        firebase_admin.initialize_app(credentials)
+    else:
+        firebase_admin.initialize_app()
+
 
 app = FastAPI()
 
@@ -106,7 +122,6 @@ app.include_router(trends.router)
 app.include_router(other.router)
 
 app.include_router(firmware.router)
-app.include_router(updates.router)
 app.include_router(sync.router)
 
 app.include_router(apps.router)
@@ -125,8 +140,6 @@ app.include_router(folders.router)
 app.include_router(knowledge_graph.router)
 app.include_router(goals.router)
 app.include_router(announcements.router)
-app.include_router(phone_calls.router)
-app.include_router(agent_tools.router)
 app.include_router(tools.router)
 app.include_router(metrics.router)
 app.include_router(fair_use_admin.router)
