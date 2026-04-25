@@ -70,6 +70,17 @@ LOCAL_LLM_API_KEY=sk-dummy
 
 # Local storage
 LOCAL_DB_PATH=./omi_local.db
+
+# Local encryption (32+ bytes; matches backend test fixtures)
+ENCRYPTION_SECRET=omi_ZwB2ZNqB2HHpMK6wStk7sTpavJiPTFg7gXUHnc4tFABPU6pZ2c2DKgehtfgi4RZv
+
+# Dummy OpenAI key so import-time client construction doesn't fail in LOCAL_MODE
+OPENAI_API_KEY=sk-dummy
+
+# Dummy Typesense settings so import-time client construction doesn't fail
+TYPESENSE_HOST=localhost
+TYPESENSE_HOST_PORT=8108
+TYPESENSE_API_KEY=typesense-dummy
 ENVEOF
         ok "Created $env_file"
     fi
@@ -98,6 +109,37 @@ wait_for_port() {
         count=$((count + 1))
     done
     warn "$name not responding on port $port after ${max}s"
+    return 1
+}
+
+python_venv_needs_rebuild() {
+    local venv="$1"
+    if [ ! -x "$venv/bin/python" ]; then
+        return 0
+    fi
+
+    if ! "$venv/bin/python" - <<'PY'
+import importlib.metadata as m
+import sys
+
+try:
+    lco = m.version("langchain-openai")
+    lcc = m.version("langchain-core")
+    openai = m.version("openai")
+except Exception:
+    sys.exit(1)
+
+if lco != "0.3.18":
+    sys.exit(2)
+if not lcc.startswith("0.3."):
+    sys.exit(3)
+if int(openai.split(".", 1)[0]) >= 2:
+    sys.exit(4)
+PY
+    then
+        return 0
+    fi
+
     return 1
 }
 
@@ -131,11 +173,56 @@ start_python() {
         return 0
     fi
 
+    # Find suitable Python (3.11+ preferred)
+    local PY=""
+    for candidate in python3.12 python3.11 python3; do
+        if command -v "$candidate" > /dev/null 2>&1; then
+            PY="$candidate"
+            break
+        fi
+    done
+    if [ -z "$PY" ]; then
+        fail "No python3 found. Install Python 3.11+"
+        return 1
+    fi
+
+    local BE="$SCRIPT_DIR/../backend"
+    local VENV="$BE/.venv"
+
+    # Rebuild venv if missing or if incompatible packages were installed previously.
+    if [ -d "$VENV" ] && python_venv_needs_rebuild "$VENV"; then
+        warn "Recreating Python virtual environment to fix dependency mismatch..."
+        rm -rf "$VENV"
+    fi
+
+    # Create venv if missing
+    if [ ! -d "$VENV" ]; then
+        step "Creating Python virtual environment..."
+        "$PY" -m venv "$VENV"
+        "$VENV/bin/pip" install -q --upgrade pip
+    fi
+
+    # Install deps if stale
+    if [ ! -f "$VENV/.deps_installed" ] || \
+       [ "$BE/requirements.txt" -nt "$VENV/.deps_installed" ]; then
+        step "Installing Python dependencies..."
+        "$VENV/bin/pip" install -q -r "$BE/requirements.txt" 2>&1 | tail -3
+        touch "$VENV/.deps_installed"
+    fi
+
     step "Starting Python backend on port $PYTHON_PORT..."
     (
-        cd "$SCRIPT_DIR/backend"
+        cd "$BE"
         export LOCAL_MODE=1
-        exec python3 -m uvicorn main:app \
+        export LOCAL_LLM_BASE_URL="${LOCAL_LLM_BASE_URL:-http://localhost:11434/v1}"
+        export LOCAL_LLM_MODEL="${LOCAL_LLM_MODEL:-llama3}"
+        export LOCAL_LLM_API_KEY="${LOCAL_LLM_API_KEY:-sk-dummy}"
+        export ENCRYPTION_SECRET="${ENCRYPTION_SECRET:-omi_ZwB2ZNqB2HHpMK6wStk7sTpavJiPTFg7gXUHnc4tFABPU6pZ2c2DKgehtfgi4RZv}"
+        export OPENAI_API_KEY="${OPENAI_API_KEY:-sk-dummy}"
+        export TYPESENSE_HOST="${TYPESENSE_HOST:-localhost}"
+        export TYPESENSE_HOST_PORT="${TYPESENSE_HOST_PORT:-8108}"
+        export TYPESENSE_API_KEY="${TYPESENSE_API_KEY:-typesense-dummy}"
+        exec "$VENV/bin/python" -m uvicorn main:app \
             --host 127.0.0.1 --port $PYTHON_PORT \
             --ws-ping-interval 30 \
             --ws-ping-timeout 120 2>&1 | sed 's/^/[python] /'
@@ -155,7 +242,7 @@ start_rust() {
 
     step "Starting Rust backend on port $RUST_PORT..."
     (
-        cd "$SCRIPT_DIR/desktop/Backend-Rust"
+        cd "$SCRIPT_DIR/Backend-Rust"
         # Load .env if present
         if [ -f ".env" ]; then
             set -a && source <(grep -v '^#' .env | grep -v '^$') 2>/dev/null; set +a

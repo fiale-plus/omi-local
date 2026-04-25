@@ -119,6 +119,215 @@ if _LOCAL_MODE:
 
     def set_person_speech_sample_transcript(uid: str, person_id: str, sample_index: int, transcript: str) -> bool:
         raise NotImplementedError("cloud-only")
+
+    # **************************************
+    # ************* Language ***************
+    # **************************************
+
+    def get_user_language_preference(uid: str) -> str:
+        return ""
+
+    def set_user_language_preference(uid: str, language: str) -> None:
+        pass
+
+    # **************************************
+    # ************* Onboarding *************
+    # **************************************
+
+    def get_user_onboarding_state(uid: str) -> dict:
+        return {}
+
+    def set_user_onboarding_state(uid: str, onboarding_data: dict) -> None:
+        pass
+
+    # **************************************
+    # ********** Transcription *************
+    # **************************************
+
+    def get_user_transcription_preferences(uid: str) -> dict:
+        return {}
+
+    def set_user_transcription_preferences(uid: str, preferences: dict) -> None:
+        pass
+
+    # **************************************
+    # ************ Settings ****************
+    # **************************************
+
+    def get_assistant_settings(uid: str) -> Optional[dict]:
+        return None
+
+    def update_assistant_settings(uid: str, settings: dict) -> None:
+        pass
+
+    def get_notification_settings(uid: str) -> Optional[dict]:
+        return None
+
+    def update_notification_settings(uid: str, settings: dict) -> None:
+        pass
+
+    # **************************************
+    # ************* Profile ****************
+    # **************************************
+
+    def get_ai_user_profile(uid: str) -> Optional[str]:
+        return None
+
+    def update_ai_user_profile(uid: str, profile: str) -> None:
+        pass
+
+    # **************************************
+    # ********** Integrations **************
+    # **************************************
+
+    def get_integration(uid: str, integration_id: str) -> Optional[dict]:
+        return None
+
+    def set_integration(uid: str, integration_id: str, data: dict) -> None:
+        pass
+
+    def delete_integration(uid: str, integration_id: str) -> None:
+        pass
+
+    def get_task_integrations(uid: str) -> list:
+        return []
+
+    def get_task_integration(uid: str, integration_id: str) -> Optional[dict]:
+        return None
+
+    def get_default_task_integration(uid: str) -> Optional[str]:
+        return None
+
+    def set_default_task_integration(uid: str, integration_id: str) -> None:
+        pass
+
+    def set_task_integration(uid: str, integration_id: str, data: dict) -> None:
+        pass
+
+    def delete_task_integration(uid: str, integration_id: str) -> None:
+        pass
+
+    # **************************************
+    # ********* Data Protection ************
+    # **************************************
+
+    def get_data_protection_level(uid: str) -> str:
+        return "enhanced"
+
+    def set_data_protection_level(uid: str, level: str) -> None:
+        pass
+
+    def set_migration_status(uid: str, target_level: str) -> None:
+        pass
+
+    def finalize_migration(uid: str, target_level: str) -> None:
+        pass
+
+    # **************************************
+    # ********** Subscription **************
+    # **************************************
+
+    def get_user_subscription(uid: str) -> Optional[dict]:
+        return None
+
+    def get_user_valid_subscription(uid: str) -> Optional[dict]:
+        return None
+
+    def update_user_subscription(uid: str, data: dict) -> None:
+        pass
+
+    # **************************************
+    # ************* Misc *******************
+    # **************************************
+
+    def get_user_training_data_opt_in(uid: str) -> bool:
+        return False
+
+    def set_user_training_data_opt_in(uid: str, opt_in: bool) -> None:
+        pass
+
+    def clear_person_speaker_embedding(uid: str, person_id: str) -> bool:
+        raise NotImplementedError("cloud-only")
+
+    def delete_user_data(uid: str) -> None:
+        raise NotImplementedError("cloud-only")
+
+    def get_agent_vm(uid: str) -> Optional[dict]:
+        return None
+
+    def get_conversation_summary_rating_score(uid: str, conversation_id: str) -> Optional[dict]:
+        return None
+
+    def set_conversation_summary_rating_score(uid: str, conversation_id: str, score: int) -> None:
+        pass
+
+    def set_chat_message_rating_score(uid: str, message_id: str, score: int) -> None:
+        pass
+
+    def get_all_ratings(uid: str) -> list:
+        return []
+
+    # **************************************
+    # ************ Payments ****************
+    # **************************************
+
+    def get_stripe_connect_account_id(uid: str):
+        return None
+
+    def set_stripe_connect_account_id(uid: str, account_id: str):
+        pass
+
+    def set_paypal_payment_details(uid: str, data: dict):
+        pass
+
+    def get_paypal_payment_details(uid: str):
+        return None
+
+    def set_default_payment_method(uid: str, payment_method_id: str):
+        pass
+
+    def get_default_payment_method(uid: str):
+        return None
+
+    def get_stripe_customer_id(uid: str) -> Optional[str]:
+        return None
+
+    def set_stripe_customer_id(uid: str, customer_id: str):
+        pass
+
+    def get_user_by_stripe_customer_id(customer_id: str):
+        return None
+
+    # **************************************
+    # ********* Samples / Migration ********
+    # **************************************
+
+    def _add_sample_transaction(transaction, person_ref, sample_path, transcript, max_samples):
+        return False
+
+    def update_person_speech_samples_after_migration(
+        uid: str,
+        person_id: str,
+        samples: list,
+        transcripts: list,
+        version: int,
+        speaker_embedding: Optional[list] = None,
+    ) -> bool:
+        return True
+
+    def update_person_speech_samples_version(uid: str, person_id: str, version: int) -> bool:
+        return True
+
+    def _delete_collection_recursive(collection_ref, batch_size: int = 450):
+        return
+
+    # **************************************
+    # ******** Assistant settings **********
+    # **************************************
+
+    def _get_raw_assistant_settings(uid: str) -> dict:
+        return {}
+
 else:
     from datetime import datetime, timezone
     from typing import Optional

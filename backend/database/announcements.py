@@ -82,6 +82,45 @@ if _LOCAL_MODE:
         device_model: Optional[str] = None,
     ) -> List[Announcement]:
         raise NotImplementedError("cloud-only")
+
+    def _parse_version(version: str) -> tuple:
+        """Parse semantic version and optional build number."""
+        if not version:
+            return ((0, 0, 0), 0, False)
+
+        try:
+            build_str = ""
+            has_build = "+" in version
+            if has_build:
+                version, build_str = version.split("+", 1)
+            build_number = int(build_str) if build_str else 0
+            parts = version.split(".")
+            version_parts = tuple(int(p) for p in parts)
+            while len(version_parts) < 3:
+                version_parts = version_parts + (0,)
+            return (version_parts[:3], build_number, has_build)
+        except (ValueError, AttributeError):
+            return ((0, 0, 0), 0, False)
+
+    def _version_tuple(version: str) -> tuple:
+        semantic, build, _ = _parse_version(version)
+        return semantic + (build,)
+
+    def _compare_versions(v1: str, v2: str) -> int:
+        sem1, build1, has_build1 = _parse_version(v1)
+        sem2, build2, has_build2 = _parse_version(v2)
+
+        if sem1 < sem2:
+            return -1
+        if sem1 > sem2:
+            return 1
+        if not has_build1 or not has_build2:
+            return 0
+        if build1 < build2:
+            return -1
+        if build1 > build2:
+            return 1
+        return 0
 else:
     from google.cloud.firestore_v1 import FieldFilter
 

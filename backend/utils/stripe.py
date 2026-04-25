@@ -1,5 +1,4 @@
-"""Stub for airgap/LOCAL_MODE=1 — Stripe calls are not available."""
-import os
+"""Stripe airgap stub for LOCAL_MODE=1.
 
 import pycountry
 import stripe
@@ -224,3 +223,37 @@ def get_supported_countries():
     redis_db.set_generic_cache('stripe_supported_countries', countries, 604800)
     return countries
 raise NotImplementedError("stripe module is stubbed for LOCAL_MODE=1 airgap deployment")
+This module keeps import-time code paths alive in fully offline mode.
+Any attempt to actually use Stripe functionality will raise a clear
+NotImplementedError.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+base_url = ""
+
+class _StripeCallableStub:
+    __slots__ = ("_name",)
+
+    def __init__(self, name: str):
+        self._name = name
+
+    def __call__(self, *args: Any, **kwargs: Any):
+        raise NotImplementedError(f"stripe.{self._name} is not available in LOCAL_MODE=1 airgap deployment")
+
+    def __getattr__(self, item: str):
+        return _StripeCallableStub(f"{self._name}.{item}")
+
+class _StripeProxy(_StripeCallableStub):
+    pass
+
+stripe = _StripeProxy("stripe")
+
+def __getattr__(name: str):
+    if name == "base_url":
+        return base_url
+    if name == "stripe":
+        return stripe
+    return _StripeCallableStub(name)

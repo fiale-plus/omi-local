@@ -978,7 +978,6 @@ async fn merge_conversations(
                     merged_conversation.status = ConversationStatus::Completed;
                 }
             }
-        }
     } else {
         merged_conversation.status = ConversationStatus::Completed;
     }

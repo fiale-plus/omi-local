@@ -92,6 +92,7 @@ langchain-google-genai==2.1.12
 langchain-openai==0.3.35
 langchain-pinecone==0.2.12
 pinecone==7.3.0
+langchain-openai==0.3.18
 langchain-text-splitters==0.3.11
 langgraph==0.6.10
 langgraph-checkpoint==2.1.2

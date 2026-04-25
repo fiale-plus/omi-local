@@ -792,11 +792,12 @@ parser = PydanticOutputParser(pydantic_object=Structured)
 
 encoding = tiktoken.encoding_for_model('gpt-4')
     def __init__(self, model: str, default: OpenAIEmbeddings, ctor_kwargs: Dict[str, Any]):
+    def __init__(self, model: str, default: Any, ctor_kwargs: Dict[str, Any]):
         object.__setattr__(self, "_model", model)
         object.__setattr__(self, "_default", default)
         object.__setattr__(self, "_ctor_kwargs", ctor_kwargs)
 
-    def _resolve(self) -> OpenAIEmbeddings:
+    def _resolve(self) -> Any:
         if not _LOCAL_LLM_ENABLED:
             return self._default
         cache_key = f"emb:{self._model}"
@@ -897,13 +898,14 @@ llm_persona_medium_stream = _make_stub_llm("llm_persona_medium_stream")
 llm_gemini_flash = _make_stub_llm("llm_gemini_flash")
 
 # Anthropic agent model — not available in LOCAL_MODE
+anthropic_client = _make_stub_llm("anthropic_client")
 ANTHROPIC_AGENT_MODEL: str = ""
 ANTHROPIC_AGENT_COMPLEX_MODEL: str = ""
 
 # embeddings proxy for LOCAL_MODE
 embeddings = _LocalEmbeddingsProxy(
     model="text-embedding-3-large",
-    default=OpenAIEmbeddings(model="text-embedding-3-large"),
+    default=_StubProxy(),
     ctor_kwargs={},
 )
 parser = PydanticOutputParser(pydantic_object=Structured)

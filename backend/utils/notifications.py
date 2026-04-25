@@ -75,3 +75,13 @@ def send_action_item_update_message(user_id: str, action_item_id: str, descripti
 def send_action_item_deletion_message(user_id: str, action_item_id: str):
     """No-op stub for airgap."""
     logger.debug(f"LOCAL_MODE=1: send_action_item_deletion_message suppressed")
+
+
+def send_action_item_completed_notification(user_id: str, action_item_description: str):
+    """No-op stub for airgap."""
+    logger.debug(f"LOCAL_MODE=1: send_action_item_completed_notification suppressed")
+
+
+def send_action_item_created_notification(user_id: str, action_item_description: str):
+    """No-op stub for airgap."""
+    logger.debug(f"LOCAL_MODE=1: send_action_item_created_notification suppressed")

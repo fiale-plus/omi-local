@@ -61,11 +61,10 @@ redis = { version = "0.25", features = ["tokio-comp", "connection-manager"] }
 gcp_auth = "0.12"
 
 # SQLite for local-first mode (LOCAL_MODE)
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.31", features = ["bundled", "chrono"] }
 
 # Note: Using Firestore REST API directly instead of gcloud-sdk for compatibility
 
 # Repository / SQLite storage
-rusqlite = { version = "0.31", features = ["bundled"] }
 async-trait = "0.1"
 dirs = "5"

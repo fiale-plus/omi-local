@@ -5,8 +5,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::sync::{Arc, Mutex};
 use ulid::Ulid;
 
 use crate::models::{
@@ -34,7 +33,7 @@ pub struct StagedTaskDB {
 /// Handle to the local SQLite database
 #[derive(Clone)]
 pub struct LocalDb {
-    pool: Arc<RwLock<Connection>>,
+    pool: Arc<Mutex<Connection>>,
 }
 
 impl LocalDb {
@@ -42,7 +41,7 @@ impl LocalDb {
     pub async fn open(path: PathBuf) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let conn = Connection::open(path)?;
         Self::init_schema(&conn)?;
-        Ok(Self { pool: Arc::new(RwLock::new(conn)) })
+        Ok(Self { pool: Arc::new(Mutex::new(conn)) })
     }
 
     /// Open an in-memory database (for testing).
@@ -50,7 +49,7 @@ impl LocalDb {
     pub async fn in_memory() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let conn = Connection::open_in_memory()?;
         Self::init_schema(&conn)?;
-        Ok(Self { pool: Arc::new(RwLock::new(conn)) })
+        Ok(Self { pool: Arc::new(Mutex::new(conn)) })
     }
 
     fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
@@ -196,7 +195,7 @@ impl LocalDb {
 
     #[allow(dead_code)]
     pub async fn get_conversations(&self, user_id: &str) -> Result<Vec<Conversation>, Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         let mut stmt = pool.prepare(
             "SELECT id, title, folder_id, created_at, updated_at, last_message_time, conversation_type, metadata, is_starred, visibility, share_link, transcript FROM conversations WHERE 1=1 ORDER BY last_message_time DESC",
         )?;
@@ -225,7 +224,7 @@ impl LocalDb {
 
     #[allow(dead_code)]
     pub async fn get_conversation(&self, user_id: &str, id: &str) -> Result<Option<Conversation>, Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         let mut stmt = pool.prepare(
             "SELECT id, title, folder_id, created_at, updated_at, last_message_time, conversation_type, metadata, is_starred, visibility, share_link, transcript FROM conversations WHERE id = ?",
         )?;
@@ -254,7 +253,7 @@ impl LocalDb {
 
     #[allow(dead_code)]
     pub async fn create_conversation(&self, user_id: &str, req: CreateConversationRequest) -> Result<Conversation, Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         let now = Utc::now().to_rfc3339();
         let id = Ulid::new().to_string();
         pool.execute(
@@ -267,7 +266,7 @@ impl LocalDb {
 
     #[allow(dead_code)]
     pub async fn update_conversation_title(&self, user_id: &str, id: &str, title: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         let now = Utc::now().to_rfc3339();
         pool.execute("UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?", params![title, now, id])?;
         Ok(())
@@ -275,21 +274,21 @@ impl LocalDb {
 
     #[allow(dead_code)]
     pub async fn set_conversation_starred(&self, user_id: &str, id: &str, starred: bool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         pool.execute("UPDATE conversations SET is_starred = ? WHERE id = ?", params![starred as i32, id])?;
         Ok(())
     }
 
     #[allow(dead_code)]
     pub async fn set_conversation_visibility(&self, user_id: &str, id: &str, visibility: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         pool.execute("UPDATE conversations SET visibility = ? WHERE id = ?", params![visibility, id])?;
         Ok(())
     }
 
     #[allow(dead_code)]
     pub async fn delete_conversation(&self, user_id: &str, id: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         pool.execute("DELETE FROM conversations WHERE id = ?", [id])?;
         Ok(())
     }
@@ -298,7 +297,7 @@ impl LocalDb {
 
     #[allow(dead_code)]
     pub async fn get_folders(&self, user_id: &str) -> Result<Vec<Folder>, Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         let mut stmt = pool.prepare(
             "SELECT id, name, color, icon, created_at, sort_order FROM folders WHERE user_id = ? ORDER BY sort_order",
         )?;
@@ -321,7 +320,7 @@ impl LocalDb {
 
     #[allow(dead_code)]
     pub async fn create_folder(&self, user_id: &str, req: CreateFolderRequest) -> Result<Folder, Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         let now = Utc::now().to_rfc3339();
         let id = Ulid::new().to_string();
         pool.execute(
@@ -329,7 +328,7 @@ impl LocalDb {
             params![id, req.name, req.color.unwrap_or_else(|| "9b9b9b".to_string()), req.icon.unwrap_or_else(|| "folder".to_string()), now, 0, user_id],
         )?;
         drop(pool);
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         let mut stmt = pool.prepare("SELECT id, name, color, icon, created_at, sort_order FROM folders WHERE id = ?")?;
         let mut rows = stmt.query_map([&id], |row| {
             Ok(Folder { id: row.get(0)?, name: row.get(1)?, color: row.get(2)?, icon: row.get(3)?, created_at: row.get(4)?, sort_order: row.get(5)? })
@@ -339,14 +338,14 @@ impl LocalDb {
 
     #[allow(dead_code)]
     pub async fn delete_folder(&self, user_id: &str, id: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         pool.execute("DELETE FROM folders WHERE id = ? AND user_id = ?", params![id, user_id])?;
         Ok(())
     }
 
     #[allow(dead_code)]
     pub async fn move_conversation_to_folder(&self, user_id: &str, conversation_id: &str, folder_id: Option<&str>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         pool.execute("UPDATE conversations SET folder_id = ? WHERE id = ?", params![folder_id, conversation_id])?;
         Ok(())
     }
@@ -355,7 +354,7 @@ impl LocalDb {
 
     #[allow(dead_code)]
     pub async fn get_memories(&self, user_id: &str, limit: i32, offset: i32) -> Result<Vec<Memory>, Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         let mut stmt = pool.prepare(
             "SELECT id, user_id, content, category, created_at, updated_at, is_read, is_dismissed, visibility, relevance_score FROM memories WHERE user_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
         )?;
@@ -380,7 +379,7 @@ impl LocalDb {
 
     #[allow(dead_code)]
     pub async fn create_memory(&self, user_id: &str, req: CreateMemoryRequest) -> Result<CreateMemoryResponse, Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         let now = Utc::now().to_rfc3339();
         let id = Ulid::new().to_string();
         pool.execute(
@@ -392,14 +391,14 @@ impl LocalDb {
 
     #[allow(dead_code)]
     pub async fn delete_memory(&self, user_id: &str, id: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         pool.execute("DELETE FROM memories WHERE id = ? AND user_id = ?", params![id, user_id])?;
         Ok(())
     }
 
     #[allow(dead_code)]
     pub async fn update_memory_read_status(&self, user_id: &str, id: &str, is_read: bool, is_dismissed: bool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         pool.execute(
             "UPDATE memories SET is_read = ?, is_dismissed = ? WHERE id = ? AND user_id = ?",
             params![is_read as i32, is_dismissed as i32, id, user_id],
@@ -409,14 +408,14 @@ impl LocalDb {
 
     #[allow(dead_code)]
     pub async fn mark_all_memories_read(&self, user_id: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         pool.execute("UPDATE memories SET is_read = 1 WHERE user_id = ?", [user_id])?;
         Ok(())
     }
 
     #[allow(dead_code)]
     pub async fn delete_all_memories(&self, user_id: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         pool.execute("DELETE FROM memories WHERE user_id = ?", [user_id])?;
         Ok(())
     }
@@ -425,7 +424,7 @@ impl LocalDb {
 
     #[allow(dead_code)]
     pub async fn get_action_items(&self, user_id: &str, limit: i32, offset: i32) -> Result<ActionItemsListResponse, Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         let mut stmt = pool.prepare(
             "SELECT id, user_id, title, description, due_date, completed_at, created_at, updated_at, status, relevance_score, source, metadata FROM action_items WHERE user_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
         )?;
@@ -453,7 +452,7 @@ impl LocalDb {
 
     #[allow(dead_code)]
     pub async fn get_action_item_by_id(&self, user_id: &str, id: &str) -> Result<Option<ActionItemDB>, Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         let mut stmt = pool.prepare(
             "SELECT id, user_id, title, description, due_date, completed_at, created_at, updated_at, status, relevance_score, source, metadata FROM action_items WHERE id = ? AND user_id = ?",
         )?;
@@ -470,7 +469,7 @@ impl LocalDb {
 
     #[allow(dead_code)]
     pub async fn create_action_item(&self, user_id: &str, req: CreateActionItemRequest) -> Result<ActionItemDB, Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         let now = Utc::now().to_rfc3339();
         let id = Ulid::new().to_string();
         pool.execute(
@@ -483,7 +482,7 @@ impl LocalDb {
 
     #[allow(dead_code)]
     pub async fn update_action_item(&self, user_id: &str, id: &str, title: Option<&str>, description: Option<&str>, due_date: Option<&str>, status: Option<&str>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         let now = Utc::now().to_rfc3339();
         if let Some(t) = title {
             pool.execute("UPDATE action_items SET title = ?, updated_at = ? WHERE id = ? AND user_id = ?", params![t, now, id, user_id])?;
@@ -503,14 +502,14 @@ impl LocalDb {
 
     #[allow(dead_code)]
     pub async fn delete_action_item(&self, user_id: &str, id: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         pool.execute("DELETE FROM action_items WHERE id = ? AND user_id = ?", params![id, user_id])?;
         Ok(())
     }
 
     #[allow(dead_code)]
     pub async fn batch_update_scores(&self, user_id: &str, scores: &[(String, i32)]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         for (id, score) in scores {
             pool.execute("UPDATE action_items SET relevance_score = ? WHERE id = ? AND user_id = ?", params![score, id, user_id])?;
         }
@@ -521,7 +520,7 @@ impl LocalDb {
 
     #[allow(dead_code)]
     pub async fn get_staged_tasks(&self, user_id: &str, limit: i32, offset: i32) -> Result<Vec<StagedTaskDB>, Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         let mut stmt = pool.prepare(
             "SELECT id, user_id, title, description, relevance_score, created_at, metadata FROM staged_tasks WHERE user_id = ? ORDER BY relevance_score DESC LIMIT ? OFFSET ?",
         )?;
@@ -543,7 +542,7 @@ impl LocalDb {
 
     #[allow(dead_code)]
     pub async fn create_staged_task(&self, user_id: &str, title: &str, description: &str, relevance_score: i32) -> Result<StagedTaskDB, Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         let now = Utc::now().to_rfc3339();
         let id = Ulid::new().to_string();
         pool.execute(
@@ -551,7 +550,7 @@ impl LocalDb {
             params![id, user_id, title, description, relevance_score, now, ""],
         )?;
         drop(pool);
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         let mut stmt = pool.prepare("SELECT id, user_id, title, description, relevance_score, created_at, metadata FROM staged_tasks WHERE id = ?")?;
         let mut rows = stmt.query_map([&id], |row| {
             Ok(StagedTaskDB { id: row.get(0)?, user_id: row.get(1)?, title: row.get(2)?, description: row.get(3)?, relevance_score: row.get(4)?, created_at: row.get(5)?, metadata: row.get(6)? })
@@ -561,14 +560,14 @@ impl LocalDb {
 
     #[allow(dead_code)]
     pub async fn delete_staged_task(&self, user_id: &str, id: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         pool.execute("DELETE FROM staged_tasks WHERE id = ? AND user_id = ?", params![id, user_id])?;
         Ok(())
     }
 
     #[allow(dead_code)]
     pub async fn batch_update_staged_scores(&self, user_id: &str, scores: &[(String, i32)]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         for (id, score) in scores {
             pool.execute("UPDATE staged_tasks SET relevance_score = ? WHERE id = ? AND user_id = ?", params![score, id, user_id])?;
         }
@@ -579,7 +578,7 @@ impl LocalDb {
 
     #[allow(dead_code)]
     pub async fn get_goals(&self, user_id: &str) -> Result<Vec<GoalDB>, Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         let mut stmt = pool.prepare(
             "SELECT id, user_id, title, goal_type, target_date, current_value, target_value, status, created_at, updated_at, metadata FROM goals WHERE user_id = ? AND status = 'active' ORDER BY created_at DESC",
         )?;
@@ -605,7 +604,7 @@ impl LocalDb {
 
     #[allow(dead_code)]
     pub async fn create_goal(&self, user_id: &str, req: CreateGoalRequest) -> Result<GoalDB, Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         let now = Utc::now().to_rfc3339();
         let id = Ulid::new().to_string();
         pool.execute(
@@ -613,7 +612,7 @@ impl LocalDb {
             params![id, user_id, req.title, req.goal_type.unwrap_or_else(|| "binary".to_string()), req.target_date, 0.0, req.target_value.unwrap_or(1.0), "active", now, now, ""],
         )?;
         drop(pool);
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         let mut stmt = pool.prepare("SELECT id, user_id, title, goal_type, target_date, current_value, target_value, status, created_at, updated_at, metadata FROM goals WHERE id = ?")?;
         let mut rows = stmt.query_map([&id], |row| {
             Ok(GoalDB { id: row.get(0)?, user_id: row.get(1)?, title: row.get(2)?, goal_type: row.get(3)?, target_date: row.get(4)?, current_value: row.get(5)?, target_value: row.get(6)?, status: row.get(7)?, created_at: row.get(8)?, updated_at: row.get(9)?, metadata: row.get(10)? })
@@ -623,7 +622,7 @@ impl LocalDb {
 
     #[allow(dead_code)]
     pub async fn update_goal_progress(&self, user_id: &str, id: &str, current_value: f64) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         let now = Utc::now().to_rfc3339();
         pool.execute("UPDATE goals SET current_value = ?, updated_at = ? WHERE id = ? AND user_id = ?", params![current_value, now, id, user_id])?;
         Ok(())
@@ -631,7 +630,7 @@ impl LocalDb {
 
     #[allow(dead_code)]
     pub async fn complete_goal(&self, user_id: &str, id: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         let now = Utc::now().to_rfc3339();
         pool.execute("UPDATE goals SET status = 'completed', current_value = target_value, updated_at = ? WHERE id = ? AND user_id = ?", params![now, id, user_id])?;
         Ok(())
@@ -639,14 +638,14 @@ impl LocalDb {
 
     #[allow(dead_code)]
     pub async fn delete_goal(&self, user_id: &str, id: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         pool.execute("DELETE FROM goals WHERE id = ? AND user_id = ?", params![id, user_id])?;
         Ok(())
     }
 
     #[allow(dead_code)]
     pub async fn get_completed_goals(&self, user_id: &str) -> Result<Vec<GoalDB>, Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         let mut stmt = pool.prepare(
             "SELECT id, user_id, title, goal_type, target_date, current_value, target_value, status, created_at, updated_at, metadata FROM goals WHERE user_id = ? AND status = 'completed' ORDER BY updated_at DESC",
         )?;
@@ -676,7 +675,7 @@ impl LocalDb {
         let week_ago = date - chrono::Duration::days(7);
         let week_start = format!("{}T00:00:00Z", week_ago.format("%Y-%m-%d"));
 
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
 
         // Daily score: completed/total action items due today
         let today_completed: i32 = pool.query_row(
@@ -735,7 +734,7 @@ impl LocalDb {
 
     #[allow(dead_code)]
     pub async fn get_messages(&self, conversation_id: &str, limit: i32, offset: i32) -> Result<Vec<MessageDB>, Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         let mut stmt = pool.prepare(
             "SELECT id, conversation_id, role, content, created_at, updated_at, metadata FROM messages WHERE conversation_id = ? ORDER BY created_at ASC LIMIT ? OFFSET ?",
         )?;
@@ -757,7 +756,7 @@ impl LocalDb {
 
     #[allow(dead_code)]
     pub async fn save_message(&self, conversation_id: &str, role: &str, content: &str) -> Result<MessageDB, Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         let now = Utc::now().to_rfc3339();
         let id = Ulid::new().to_string();
         pool.execute(
@@ -765,7 +764,7 @@ impl LocalDb {
             params![id, conversation_id, role, content, now, now, ""],
         )?;
         drop(pool);
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         let mut stmt = pool.prepare("SELECT id, conversation_id, role, content, created_at, updated_at, metadata FROM messages WHERE id = ?")?;
         let mut rows = stmt.query_map([&id], |row| {
             Ok(MessageDB { id: row.get(0)?, conversation_id: row.get(1)?, role: row.get(2)?, content: row.get(3)?, created_at: row.get(4)?, updated_at: row.get(5)?, metadata: row.get(6)? })
@@ -777,7 +776,7 @@ impl LocalDb {
 
     #[allow(dead_code)]
     pub async fn get_chat_sessions(&self, user_id: &str) -> Result<Vec<ChatSessionDB>, Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         let mut stmt = pool.prepare(
             "SELECT id, user_id, title, created_at, updated_at, app_id FROM chat_sessions WHERE user_id = ? ORDER BY updated_at DESC",
         )?;
@@ -798,7 +797,7 @@ impl LocalDb {
 
     #[allow(dead_code)]
     pub async fn create_chat_session(&self, user_id: &str, title: &str, app_id: Option<&str>) -> Result<ChatSessionDB, Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         let now = Utc::now().to_rfc3339();
         let id = Ulid::new().to_string();
         pool.execute(
@@ -806,7 +805,7 @@ impl LocalDb {
             params![id, user_id, title, now, now, app_id],
         )?;
         drop(pool);
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         let mut stmt = pool.prepare("SELECT id, user_id, title, created_at, updated_at, app_id FROM chat_sessions WHERE id = ?")?;
         let mut rows = stmt.query_map([&id], |row| {
             Ok(ChatSessionDB { id: row.get(0)?, user_id: row.get(1)?, title: row.get(2)?, created_at: row.get(3)?, updated_at: row.get(4)?, app_id: row.get(5)? })
@@ -816,7 +815,7 @@ impl LocalDb {
 
     #[allow(dead_code)]
     pub async fn delete_chat_session(&self, user_id: &str, id: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         pool.execute("DELETE FROM chat_sessions WHERE id = ? AND user_id = ?", params![id, user_id])?;
         Ok(())
     }
@@ -825,7 +824,7 @@ impl LocalDb {
 
     #[allow(dead_code)]
     pub async fn get_focus_sessions(&self, user_id: &str, start_date: Option<&str>, end_date: Option<&str>) -> Result<Vec<crate::models::FocusSessionDB>, Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         let mut stmt = pool.prepare(
             "SELECT id, user_id, start_time, end_time, duration_secs, distraction_count, metadata FROM focus_sessions WHERE user_id = ? ORDER BY start_time DESC",
         )?;
@@ -849,7 +848,7 @@ impl LocalDb {
 
     #[allow(dead_code)]
     pub async fn get_user_profile(&self, user_id: &str) -> Result<Option<crate::models::UserProfile>, Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         let mut stmt = pool.prepare("SELECT value FROM user_settings WHERE key = ?")?;
         let mut rows = stmt.query_map([format!("profile_{}", user_id)], |row| {
             let value: String = row.get(0)?;
@@ -866,7 +865,7 @@ impl LocalDb {
 
     #[allow(dead_code)]
     pub async fn save_user_profile(&self, user_id: &str, profile: &crate::models::UserProfile) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         let json = serde_json::to_string(profile).map_err(|e| e.to_string())?;
         pool.execute(
             "INSERT OR REPLACE INTO user_settings (key, value) VALUES (?, ?)",
@@ -883,7 +882,7 @@ impl LocalDb {
         user_id: &str,
         rows: &[crate::models::screen_activity::ScreenActivityRow],
     ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         let mut written = 0;
         for row in rows {
             let embedding_blob: Option<Vec<u8>> = row.embedding.as_ref().map(|v| {
@@ -927,7 +926,7 @@ impl LocalDb {
         app_filter: Option<&str>,
         limit: i32,
     ) -> Result<Vec<crate::models::screen_activity::ScreenActivityRow>, Box<dyn std::error::Error + Send + Sync>> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().unwrap();
         let mut sql = "SELECT id, timestamp, app_name, window_title, ocr_text, embedding FROM screen_activity WHERE user_id = ?".to_string();
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(user_id.to_string())];
 
