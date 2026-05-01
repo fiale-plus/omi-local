@@ -1,7 +1,7 @@
 // OMI Desktop Backend - Rust
 // Port from Python backend (main.py)
 
-use axum::Router;
+use axum::{Router, http::StatusCode};
 use std::fs::OpenOptions;
 use std::io::LineWriter;
 use std::sync::Arc;
@@ -27,6 +27,7 @@ mod config;
 mod encryption;
 mod llm;
 mod models;
+mod repository;
 mod routes;
 mod services;
 mod vertex;
@@ -35,18 +36,23 @@ use auth::{firebase_auth_extension, FirebaseAuth};
 use config::Config;
 use routes::{
     // Active (real traffic from current app)
-    agent_routes, auth_routes, chat_completions_routes, config_routes, crisp_routes,
-    health_routes, proxy_routes, screen_activity_routes, tts_routes, updates_routes,
-    webhook_routes,
+    action_items_routes, advice_routes, agent_routes, apps_routes, auth_routes,
+    chat_routes, chat_sessions_routes, chat_completions_routes, config_routes,
+    conversations_routes, crisp_routes, daily_score_routes, focus_sessions_routes,
+    folder_routes, goals_routes, health_routes, knowledge_graph_routes,
+    llm_usage_routes, memories_routes, messages_routes, people_routes, personas_routes,
+    proxy_routes, screen_activity_routes, staged_tasks_routes, stats_routes,
+    tts_routes, updates_routes, users_routes, webhook_routes,
     // Deprecated stubs (return 410 Gone — current app uses Python for all data CRUD)
     deprecated_routes,
 };
-use services::{FirestoreService, IntegrationService, RedisService};
+use services::{FirestoreService, IntegrationService, LocalDb, RedisService};
 
 /// Application state shared across handlers
 #[derive(Clone)]
 pub struct AppState {
-    pub firestore: Arc<FirestoreService>,
+    /// Firestore service (None when LOCAL_MODE=1, uses local_db instead)
+    pub firestore: Option<Arc<FirestoreService>>,
     pub integrations: Arc<IntegrationService>,
     pub redis: Option<Arc<RedisService>>,
     pub config: Arc<Config>,
@@ -54,6 +60,20 @@ pub struct AppState {
     pub gemini_rate_limiter: routes::rate_limit::SharedRateLimiter,
     /// Vertex AI auth provider (present when USE_VERTEX_AI=true)
     pub vertex_auth: Option<vertex::VertexAuth>,
+    /// Local SQLite database (only populated when LOCAL_MODE=1)
+    pub local_db: Option<Arc<LocalDb>>,
+}
+
+impl AppState {
+    /// Returns a reference to Firestore, or a SERVICE_UNAVAILABLE error if not initialized.
+    /// In LOCAL_MODE=1, Firestore is never initialized — handlers should check config.local_mode
+    /// and route to local_db instead, or return an error if the endpoint requires Firestore.
+    pub fn firestore(&self) -> Result<&Arc<FirestoreService>, (StatusCode, String)> {
+        self.firestore.as_ref().ok_or_else(|| {
+            tracing::warn!("Firestore accessed but not initialized (LOCAL_MODE=1?)");
+            (StatusCode::SERVICE_UNAVAILABLE, "Firestore not available in local mode".to_string())
+        })
+    }
 }
 
 #[tokio::main]
@@ -112,21 +132,24 @@ async fn main() {
         tracing::error!("Configuration error: {}", e);
     }
 
-    // Initialize Firebase Auth
+    // Initialize Firebase Auth (skip key fetching in local mode)
     // Auth token validation may use a different project than Firestore.
     // Cloud Run OAuth issues tokens for "based-hardware" (prod), so local dev
-    // needs FIREBASE_AUTH_PROJECT_ID=based-hardware while keeping Firestore on dev.
-    let auth_project_id = config.firebase_auth_project_id.clone()
-        .or_else(|| config.firebase_project_id.clone())
-        .expect("FIREBASE_AUTH_PROJECT_ID or FIREBASE_PROJECT_ID must be set");
-    let firebase_auth = Arc::new(FirebaseAuth::new(auth_project_id));
+    // needs FIREBASE_AUTH_PROJECT_ID when running against prod cloud.
+    let firebase_auth = if config.local_mode {
+        tracing::info!("LOCAL_MODE=1 - skipping Firebase Auth initialization (dev bypass active)");
+        Arc::new(FirebaseAuth::new("local".to_string(), true))
+    } else {
+        let auth_project_id = config.firebase_auth_project_id.clone()
+            .or_else(|| config.firebase_project_id.clone())
+            .expect("FIREBASE_AUTH_PROJECT_ID or FIREBASE_PROJECT_ID must be set");
+        let auth = Arc::new(FirebaseAuth::new(auth_project_id, false));
 
-    // Refresh Firebase keys with retry (transient network failures at startup)
-    {
+        // Refresh Firebase keys with retry (transient network failures at startup)
         let max_attempts = 3u32;
         let mut last_err = None;
         for attempt in 1..=max_attempts {
-            match firebase_auth.refresh_keys().await {
+            match auth.refresh_keys().await {
                 Ok(_) => {
                     if attempt > 1 {
                         tracing::info!("Firebase keys fetched on attempt {}", attempt);
@@ -146,19 +169,25 @@ async fn main() {
         if let Some(e) = last_err {
             tracing::warn!("All {} Firebase key fetch attempts failed: {} - auth may not work", max_attempts, e);
         }
-    }
+        auth
+    };
 
-    // Initialize Firestore
-    let firestore_project_id = config.firebase_project_id.clone()
-        .expect("FIREBASE_PROJECT_ID must be set for Firestore");
-    let firestore = match FirestoreService::new(
-        firestore_project_id.clone(),
-        config.encryption_secret.clone(),
-    ).await {
-        Ok(fs) => Arc::new(fs),
-        Err(e) => {
-            tracing::warn!("Failed to initialize Firestore: {} - using placeholder", e);
-            Arc::new(FirestoreService::new(firestore_project_id, config.encryption_secret.clone()).await.unwrap())
+    // Initialize Firestore (skip in local mode — uses SQLite instead)
+    let firestore = if config.local_mode {
+        tracing::info!("LOCAL_MODE=1 - skipping Firestore initialization (using local SQLite)");
+        None
+    } else {
+        let firestore_project_id = config.firebase_project_id.clone()
+            .expect("FIREBASE_PROJECT_ID must be set for Firestore");
+        match FirestoreService::new(
+            firestore_project_id.clone(),
+            config.encryption_secret.clone(),
+        ).await {
+            Ok(fs) => Some(Arc::new(fs)),
+            Err(e) => {
+                tracing::warn!("Failed to initialize Firestore: {} - using placeholder", e);
+                Some(Arc::new(FirestoreService::new(firestore_project_id, config.encryption_secret.clone()).await.unwrap()))
+            }
         }
     };
 
@@ -230,6 +259,23 @@ async fn main() {
         });
     }
 
+    // Initialize local SQLite database when LOCAL_MODE=1
+    let local_db = if config.local_mode {
+        let db_path = config.local_db_path.clone()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("./omi_local.db"));
+        tracing::info!("LOCAL_MODE enabled - opening SQLite at {:?}", db_path);
+        match LocalDb::open(db_path).await {
+            Ok(db) => Some(Arc::new(db)),
+            Err(e) => {
+                tracing::error!("Failed to open local database: {} — LOCAL_MODE will be disabled", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let state = AppState {
         firestore,
         integrations,
@@ -238,6 +284,7 @@ async fn main() {
         crisp_session_cache: routes::crisp::new_session_cache(),
         gemini_rate_limiter,
         vertex_auth,
+        local_db,
     };
 
     // Build CORS layer
@@ -254,6 +301,55 @@ async fn main() {
         // ── Active routes (real traffic from current desktop app) ──────────
         .merge(health_routes())
         .merge(agent_routes())
+        .merge(staged_tasks_routes())
+        .merge(focus_sessions_routes())
+        .merge(apps_routes())
+        .merge(users_routes())
+        .merge(advice_routes())
+        .merge(updates_routes())
+        .merge(folder_routes())
+        .merge(goals_routes())
+        .merge(daily_score_routes())
+        .merge(people_routes())
+        .merge(personas_routes())
+        .merge(knowledge_graph_routes())
+        .merge(llm_usage_routes())
+        .merge(stats_routes())
+        .merge({
+            if config.local_mode {
+                tracing::info!("LOCAL_MODE=1 - updates routes disabled (Firestore-only)");
+                Router::new()
+            } else {
+                updates_routes()
+            }
+        })
+        .merge({
+            if config.local_mode {
+                tracing::info!("LOCAL_MODE=1 - webhooks routes disabled");
+                Router::new()
+            } else {
+                webhook_routes()
+            }
+        })
+        .merge({
+            if config.local_mode {
+                tracing::info!("LOCAL_MODE=1 - crisp routes disabled");
+                Router::new()
+            } else {
+                crisp_routes()
+            }
+        })
+        .merge(screen_activity_routes())
+        // Cloud proxy routes — disabled in LOCAL_MODE (no Gemini/Deepgram cloud calls)
+        .merge({
+            if config.local_mode {
+                tracing::info!("LOCAL_MODE=1 - cloud proxy routes disabled");
+                Router::new()
+            } else {
+                proxy_routes()
+            }
+        })
+        .merge(tts_routes())
         .merge(config_routes())
         .merge(crisp_routes())
         .merge(proxy_routes())
@@ -275,7 +371,11 @@ async fn main() {
         .layer(TraceLayer::new_for_http());
 
     // Start server
-    let addr = format!("0.0.0.0:{}", config.port);
+    let addr = if config.bind_localhost {
+        format!("127.0.0.1:{}", config.port)
+    } else {
+        format!("0.0.0.0:{}", config.port)
+    };
     tracing::info!("Starting OMI Desktop Backend on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();

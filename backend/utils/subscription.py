@@ -8,12 +8,76 @@ import stripe
 import database.users as users_db
 import database.user_usage as user_usage_db
 from database.announcements import compare_versions
+_LOCAL_MODE = os.environ.get("LOCAL_MODE") == "1"
+if not _LOCAL_MODE:
+    import stripe
+
+import database.users as users_db
+import database.user_usage as user_usage_db
+from fastapi import HTTPException
 from models.users import PlanType, SubscriptionStatus, Subscription, PlanLimits
 from utils.byok import get_byok_key
 from utils.log_sanitizer import sanitize
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# Pure version comparison — no Firestore deps
+# These were extracted from database/announcements.py to avoid import cycles
+# ============================================================================
+
+def _parse_version(version: str) -> tuple:
+    """
+    Parse version string into semantic tuple, build number, and has_build flag.
+    Returns: (semantic_tuple, build_number, has_build)
+    Examples:
+    - '1.0.10' -> ((1, 0, 10), 0, False)
+    - 'v1.0.10' -> ((1, 0, 10), 0, False)
+    - '1.0.510+240' -> ((1, 0, 510), 240, True)
+    """
+    if not version:
+        return ((0, 0, 0), 0, False)
+    version = version.lstrip("v")
+    build_number = 0
+    has_build = False
+    if "+" in version:
+        has_build = True
+        version, build_str = version.split("+", 1)
+        try:
+            build_number = int(build_str)
+        except ValueError:
+            build_number = 0
+    try:
+        parts = version.split(".")
+        version_parts = tuple(int(p) for p in parts)
+        while len(version_parts) < 3:
+            version_parts = version_parts + (0,)
+        return (version_parts[:3], build_number, has_build)
+    except (ValueError, AttributeError):
+        return ((0, 0, 0), 0, False)
+
+
+def _compare_versions(v1: str, v2: str) -> int:
+    """
+    Two-pass version comparison.
+    Returns: -1 if v1 < v2, 0 if v1 == v2, 1 if v1 > v2
+    """
+    sem1, build1, has_build1 = _parse_version(v1)
+    sem2, build2, has_build2 = _parse_version(v2)
+    if sem1 < sem2:
+        return -1
+    if sem1 > sem2:
+        return 1
+    if not has_build1 or not has_build2:
+        return 0
+    if build1 < build2:
+        return -1
+    if build1 > build2:
+        return 1
+    return 0
+
 
 PAID_PLAN_TYPES = {PlanType.unlimited, PlanType.architect, PlanType.operator}
 

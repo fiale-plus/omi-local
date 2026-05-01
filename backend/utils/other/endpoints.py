@@ -6,50 +6,61 @@ import time
 from fastapi import Depends, Header, HTTPException, WebSocketException
 from fastapi import Request
 from starlette.websockets import WebSocket
-from firebase_admin import auth
-from firebase_admin.auth import InvalidIdTokenError
 import logging
-import redis as redis_pkg
 
-from database.redis_db import check_rate_limit, try_acquire_listen_lock
-from database.users import record_user_platform
-from utils.byok import extract_byok_from_websocket, set_byok_keys, validate_byok_request, validate_byok_websocket
-from utils.rate_limit_config import RATE_POLICIES, RATE_LIMIT_SHADOW, get_effective_limit
+_LOCAL_MODE = os.getenv("LOCAL_MODE", "").lower() in ("1", "true", "yes")
 
-logger = logging.getLogger(__name__)
+if _LOCAL_MODE:
+    # LOCAL_MODE: Firebase Auth is not available — stub auth helpers
+    class InvalidIdTokenError(Exception):
+        pass
 
+    def get_user(uid: str):
+        class _FakeUser:
+            uid = uid
+            email = "dev@localhost"
+            display_name = "Local Dev User"
+        return _FakeUser()
 
-def get_user(uid: str):
-    user = auth.get_user(uid)
-    return user
+    def verify_token(token: str) -> str:
+        # Accept any token in local mode — return dev user
+        admin_key = os.getenv('ADMIN_KEY')
+        if admin_key and token == admin_key:
+            return os.getenv('ADMIN_UID', 'local-user')
+        return "local-user"
 
+else:
+    from firebase_admin import auth
+    from firebase_admin.auth import InvalidIdTokenError
 
-def verify_token(token: str) -> str:
-    """
-    Verify a Firebase token or ADMIN_KEY and return the uid.
+    def get_user(uid: str):
+        user = auth.get_user(uid)
+        return user
 
-    Args:
-        token: The token to verify (Firebase ID token or ADMIN_KEY format)
-
-    Returns:
-        The user's uid
-
-    Raises:
-        InvalidIdTokenError: If the token is invalid
-    """
-    # Check for ADMIN_KEY format
-    admin_key = os.getenv('ADMIN_KEY')
-    if admin_key and token.startswith(admin_key):
-        return token[len(admin_key) :]
-
-    # Verify Firebase token
-    try:
+    def verify_token(token: str) -> str:
+        admin_key = os.getenv('ADMIN_KEY')
+        if admin_key and token == admin_key:
+            return os.getenv('ADMIN_UID', '')
         decoded_token = auth.verify_id_token(token)
         return decoded_token['uid']
-    except InvalidIdTokenError:
-        if os.getenv('LOCAL_DEVELOPMENT') == 'true':
-            return '123'
-        raise
+
+try:
+    import redis as redis_pkg
+except ImportError:
+    redis_pkg = None
+
+from utils.rate_limit_config import RATE_POLICIES, RATE_LIMIT_SHADOW, get_effective_limit
+
+try:
+    from database.redis_db import check_rate_limit, try_acquire_listen_lock
+except ImportError:
+    check_rate_limit = None
+    try_acquire_listen_lock = None
+
+from database.users import record_user_platform
+from utils.byok import extract_byok_from_websocket, set_byok_keys, validate_byok_request, validate_byok_websocket
+
+logger = logging.getLogger(__name__)
 
 
 def get_current_user_uid(

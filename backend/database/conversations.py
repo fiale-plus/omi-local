@@ -5,25 +5,386 @@ import zlib
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Dict, Any
 
-from google.api_core.exceptions import NotFound
-from google.cloud import firestore
-from google.cloud.firestore_v1 import FieldFilter
+import os
 
-import utils.other.hume as hume
-from database import users as users_db
-from models.audio_file import AudioFile
-from models.conversation_enums import ConversationStatus, PostProcessingModel, PostProcessingStatus
-from models.conversation_photo import ConversationPhoto
-from models.transcript_segment import TranscriptSegment
-from utils import encryption
-from ._client import db
-from .helpers import set_data_protection_level, prepare_for_write, prepare_for_read, with_photos
-from utils.other.storage import list_audio_chunks
-import logging
+# LOCAL_MODE: SQLite-only, no Firestore
+_LOCAL_MODE = os.getenv("LOCAL_MODE", "").lower() in ("1", "true", "yes")
 
-logger = logging.getLogger(__name__)
+if _LOCAL_MODE:
+    # Stub: local SQLite layer is handled by local_db.py and local_fts.py
+    conversations_collection = "conversation_photos"
 
-conversations_collection = 'conversations'
+    from models.conversation_photo import ConversationPhoto  # needed for type hints in stubs below
+    from models.audio_file import AudioFile  # needed for type hints in stubs below
+    from models.conversation_enums import PostProcessingStatus, PostProcessingModel  # needed for cloud-only function defaults
+    from models.transcript_segment import TranscriptSegment  # needed for cloud-only function signatures
+    from utils.other import hume  # needed for cloud-only function signatures
+
+    # Stub decorators for local mode
+    def _nop_decorator(*args, **kwargs):
+        def _inner(f):
+            return f
+        return _inner
+
+    set_data_protection_level = _nop_decorator
+    prepare_for_write = _nop_decorator
+    prepare_for_read = _nop_decorator
+    with_photos = _nop_decorator
+
+    def _ensure_timezone_aware(dt: datetime) -> datetime:
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt
+
+    def create_conversation(uid: str, conversation_data: Dict[str, Any]):
+        raise NotImplementedError("cloud-only")
+
+    def get_conversation(uid: str, conversation_id: str):
+        from database.local_db import get_conversation
+        return get_conversation(uid, conversation_id)
+
+    def get_conversations(
+        uid: str,
+        limit: int = 100,
+        offset: int = 0,
+        include_discarded: bool = False,
+        folder_id: Optional[str] = None,
+    ):
+        from database.local_db import get_conversations as _get
+        return _get(uid, limit, offset, include_discarded, folder_id)
+
+    def update_conversation(uid: str, conversation_id: str, updates: Dict[str, Any]):
+        raise NotImplementedError("cloud-only")
+
+    def delete_conversation(uid: str, conversation_id: str):
+        raise NotImplementedError("cloud-only")
+
+    def discard_conversation(uid: str, conversation_id: str):
+        raise NotImplementedError("cloud-only")
+
+    def undiscard_conversation(uid: str, conversation_id: str):
+        raise NotImplementedError("cloud-only")
+
+    def add_conversation_message(uid: str, conversation_id: str, message_data: Dict[str, Any]):
+        raise NotImplementedError("cloud-only")
+
+    def get_conversation_messages(uid: str, conversation_id: str, limit: int = 100, offset: int = 0):
+        return []
+
+    def get_conversation_by_id(uid: str, conversation_id: str):
+        return get_conversation(uid, conversation_id)
+
+    def upsert_conversation(uid: str, conversation_data: Dict[str, Any]):
+        from database.local_db import upsert_conversation as _upsert
+        return _upsert(uid, conversation_data)
+
+    def get_or_create_conversation_summary(uid: str, conversation_id: str):
+        return None
+
+    def get_conversations_in_time_range(
+        uid: str, start: datetime, end: datetime, limit: int = 100
+    ):
+        return []
+
+    def get_daily_conversation_summaries(uid: str, date: str):
+        return []
+
+    def set_conversation_audio(
+        uid: str, conversation_id: str, audio_url: str, duration_ms: int = 0
+    ):
+        raise NotImplementedError("cloud-only")
+
+    def get_conversation_audio_urls(uid: str, conversation_id: str):
+        return []
+
+    def delete_conversation_audio(uid: str, conversation_id: str):
+        raise NotImplementedError("cloud-only")
+
+    def save_transcript_segments(
+        uid: str, conversation_id: str, segments: List[Dict[str, Any]]
+    ):
+        raise NotImplementedError("cloud-only")
+
+    def get_transcript_segments(uid: str, conversation_id: str):
+        return []
+
+    def get_conversations_by_participant(uid: str, participant_id: str):
+        return []
+
+    def get_recent_conversation_ids(uid: str, limit: int = 10) -> List[str]:
+        return []
+
+    def get_conversations_across_folders(
+        uid: str, folder_ids: List[str], limit: int = 100, offset: int = 0
+    ):
+        return []
+
+    def get_conversations_by_id_map(
+        uid: str, conversation_ids: List[str], include_discarded: bool = False
+    ):
+        return {}
+
+    def get_all_conversation_ids_across_folders(uid: str, folder_ids: List[str]):
+        return []
+
+    def save_processed_conversation(
+        uid: str, conversation_id: str, processed_data: Dict[str, Any]
+    ):
+        raise NotImplementedError("cloud-only")
+
+    def delete_all_conversations_for_user(uid: str):
+        raise NotImplementedError("cloud-only")
+
+    def conversation_exists(uid: str, conversation_id: str) -> bool:
+        return False
+
+    def is_conversation_discarded(uid: str, conversation_id: str) -> bool:
+        return False
+
+    def get_conversation_title(uid: str, conversation_id: str) -> str:
+        return ""
+
+    def set_conversation_title(uid: str, conversation_id: str, title: str):
+        raise NotImplementedError("cloud-only")
+
+    def get_conversation_overview(uid: str, conversation_id: str) -> str:
+        return ""
+
+    def set_conversation_overview(
+        uid: str, conversation_id: str, overview: str, overview_speaker: str = ""
+    ):
+        raise NotImplementedError("cloud-only")
+
+    def set_conversation_title_from_llm(
+        uid: str, conversation_id: str, title: str, title_speaker: str = ""
+    ):
+        raise NotImplementedError("cloud-only")
+
+    def set_conversation_discarded(uid: str, conversation_id: str, discarded: bool):
+        raise NotImplementedError("cloud-only")
+
+    def set_conversation_finished_at(uid: str, conversation_id: str, finished_at: datetime):
+        raise NotImplementedError("cloud-only")
+
+    def set_conversation_processing_state(
+        uid: str, conversation_id: str, state: str, model: str = ""
+    ):
+        raise NotImplementedError("cloud-only")
+
+    def set_conversation_summary(
+        uid: str,
+        conversation_id: str,
+        summary: str,
+        summary_model: str = "",
+        summary_speaker: str = "",
+    ):
+        raise NotImplementedError("cloud-only")
+
+    def set_conversation_title_and_summary(
+        uid: str,
+        conversation_id: str,
+        title: str,
+        title_speaker: str,
+        summary: str,
+        summary_model: str,
+        summary_speaker: str,
+    ):
+        raise NotImplementedError("cloud-only")
+
+    def set_conversation_photos(
+        uid: str, conversation_id: str, photos: List[ConversationPhoto]
+    ):
+        raise NotImplementedError("cloud-only")
+
+    def get_conversation_photos(uid: str, conversation_id: str):
+        return []
+
+    def set_conversation_action_items(
+        uid: str, conversation_id: str, action_items: List[Dict[str, Any]]
+    ):
+        raise NotImplementedError("cloud-only")
+
+    def set_action_item_completed(
+        uid: str, conversation_id: str, action_item_id: str, completed: bool
+    ):
+        raise NotImplementedError("cloud-only")
+
+    def set_conversation_apps_results(
+        uid: str, conversation_id: str, apps_results: List[Dict[str, Any]]
+    ):
+        raise NotImplementedError("cloud-only")
+
+    def set_conversation_transcript(
+        uid: str, conversation_id: str, transcript_text: str, full_transcript: bool = True
+    ):
+        raise NotImplementedError("cloud-only")
+
+    def set_conversation_structured_data(
+        uid: str, conversation_id: str, structured_data: Dict[str, Any]
+    ):
+        raise NotImplementedError("cloud-only")
+
+    def get_conversation_structured_data(uid: str, conversation_id: str):
+        return {}
+
+    def get_conversation_summary(uid: str, conversation_id: str):
+        return None
+
+    def get_conversation_processing_state(uid: str, conversation_id: str):
+        return {}
+
+    def get_conversations_batch(
+        uid: str, conversation_ids: List[str], include_discarded: bool = False
+    ):
+        return []
+
+    def get_conversations_count(uid: str) -> int:
+        return 0
+
+    def get_discarded_conversations_count(uid: str) -> int:
+        return 0
+
+    def get_total_conversations_count(uid: str) -> int:
+        return 0
+
+    def set_conversation_external_data(
+        uid: str, conversation_id: str, external_data: Dict[str, Any]
+    ):
+        raise NotImplementedError("cloud-only")
+
+    def set_conversation_emoji(uid: str, conversation_id: str, emoji: str):
+        raise NotImplementedError("cloud-only")
+
+    def set_conversation_language(uid: str, conversation_id: str, language: str):
+        raise NotImplementedError("cloud-only")
+
+    def set_conversation_category(uid: str, conversation_id: str, category: str):
+        raise NotImplementedError("cloud-only")
+
+    def set_conversation_folder_id(
+        uid: str, conversation_id: str, folder_id: Optional[str]
+    ):
+        raise NotImplementedError("cloud-only")
+
+    def set_conversation_suggested_summarization_apps(
+        uid: str, conversation_id: str, apps: List[str]
+    ):
+        raise NotImplementedError("cloud-only")
+
+    def get_conversations_in_folder(uid: str, folder_id: str, limit: int = 100):
+        return []
+
+    def get_conversations_grouped_by_date(
+        uid: str,
+        start_date: datetime,
+        end_date: datetime,
+        limit_per_day: int = 10,
+    ):
+        return {}
+
+    def get_conversation_transcript_text(uid: str, conversation_id: str):
+        return ""
+
+    def get_conversation_transcript_text_with_speaker_info(uid: str, conversation_id: str):
+        return ""
+
+    def set_conversation_data_protection_level(
+        uid: str, conversation_id: str, data_protection_level: str
+    ):
+        raise NotImplementedError("cloud-only")
+
+    def get_conversation_data_protection_level(uid: str, conversation_id: str):
+        return "standard"
+
+    def search_conversations(
+        uid: str,
+        query: str,
+        limit: int = 10,
+        search_transcripts: bool = False,
+        search_summaries: bool = True,
+        search_action_items: bool = False,
+    ):
+        return []
+
+    def get_conversation_insights(uid: str, conversation_id: str):
+        return {}
+
+    def get_recent_conversations_with_hume_context(
+        uid: str, limit: int = 5, max_context_length: int = 500
+    ):
+        return []
+
+    def get_conversation_for_calendar_event(
+        uid: str, conversation_id: str, host_email: Optional[str] = None
+    ):
+        return {}
+
+    def get_conversations_for_calendar(
+        uid: str, start_date: datetime, end_date: datetime, host_email: str = ""
+    ):
+        return []
+
+    def get_conversations_for_meeting(
+        uid: str, meeting_id: str, include_transcript: bool = False
+    ):
+        return {}
+
+    def set_conversation_locked(uid: str, conversation_id: str, is_locked: bool):
+        raise NotImplementedError("cloud-only")
+
+    def get_conversation_audio(
+        uid: str, conversation_id: str
+    ) -> Optional[Dict[str, Any]]:
+        return None
+
+    def set_conversation_audio_files(
+        uid: str, conversation_id: str, audio_files: List[AudioFile]
+    ):
+        raise NotImplementedError("cloud-only")
+
+    def get_conversation_audio_files(uid: str, conversation_id: str):
+        return []
+
+    def get_transcript_with_participants(uid: str, conversation_id: str):
+        return ""
+
+    def get_transcript_with_speaker_names(uid: str, conversation_id: str):
+        return ""
+
+    def get_conversation_id_from_audio_url(uid: str, audio_url: str):
+        return None
+
+    def set_meeting_conversation(uid: str, conversation_id: str, meeting_id: str):
+        raise NotImplementedError("cloud-only")
+
+    def get_meeting_conversation(uid: str, meeting_id: str):
+        return None
+
+    def update_conversation_photo_filenames(
+        uid: str, conversation_id: str, filename_mapping: Dict[str, str]
+    ):
+        raise NotImplementedError("cloud-only")
+
+else:
+    from google.api_core.exceptions import NotFound
+    from google.cloud import firestore
+    from google.cloud.firestore_v1 import FieldFilter
+
+    import utils.other.hume as hume
+    from database import users as users_db
+    from models.audio_file import AudioFile
+    from models.conversation_enums import ConversationStatus, PostProcessingModel, PostProcessingStatus
+    from models.conversation_photo import ConversationPhoto
+    from models.transcript_segment import TranscriptSegment
+    from utils import encryption
+    from ._client import db
+    from .helpers import set_data_protection_level, prepare_for_write, prepare_for_read, with_photos
+    from utils.other.storage import list_audio_chunks
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    conversations_collection = "conversations"
 
 
 def _ensure_timezone_aware(dt: datetime) -> datetime:

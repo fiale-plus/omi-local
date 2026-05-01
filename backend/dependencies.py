@@ -1,8 +1,8 @@
+import os
 from typing import List, Optional
 
 from fastapi import Depends, HTTPException, Security
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
-from firebase_admin import auth
 
 import database.mcp_api_key as mcp_api_key_db
 import database.dev_api_key as dev_api_key_db
@@ -13,19 +13,29 @@ logger = logging.getLogger(__name__)
 
 bearer_scheme = HTTPBearer()
 
+_LOCAL_MODE = os.getenv("LOCAL_MODE", "").lower() in ("1", "true", "yes")
 
-async def get_current_user_id(
-    credentials: HTTPAuthorizationCredentials = Security(bearer_scheme),
-) -> str:
-    if not credentials:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    try:
-        id_token = credentials.credentials
-        decoded_token = auth.verify_id_token(id_token)
-        return decoded_token["uid"]
-    except Exception as e:
-        logger.error(f"Error verifying Firebase ID token: {e}")
-        raise HTTPException(status_code=401, detail="Invalid authentication credentials")
+if _LOCAL_MODE:
+    # In LOCAL_MODE, Firebase Auth is not available. Return a hardcoded dev user.
+    async def get_current_user_id(
+        credentials: HTTPAuthorizationCredentials = Security(bearer_scheme),
+    ) -> str:
+        return "local-user"
+else:
+    from firebase_admin import auth as firebase_auth
+
+    async def get_current_user_id(
+        credentials: HTTPAuthorizationCredentials = Security(bearer_scheme),
+    ) -> str:
+        if not credentials:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        try:
+            id_token = credentials.credentials
+            decoded_token = firebase_auth.verify_id_token(id_token)
+            return decoded_token["uid"]
+        except Exception as e:
+            logger.error(f"Error verifying Firebase ID token: {e}")
+            raise HTTPException(status_code=401, detail="Invalid authentication credentials")
 
 
 api_key_header = APIKeyHeader(name="Authorization", auto_error=False)

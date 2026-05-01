@@ -1,19 +1,31 @@
+"""
+Filesystem-based storage adapter.
+
+Replaces Google Cloud Storage (GCS) with local filesystem storage for:
+- Audio chunks (private cloud sync)
+- Speech profiles
+- Conversation recordings
+- Chat files
+- App logos/thumbnails
+- Desktop updates
+
+All GCS bucket operations are replaced with equivalent filesystem operations.
+GCS URLs (https://storage.googleapis.com/...) are replaced with file:// URLs.
+"""
+
 import datetime
 import io
 import json
 import os
 import struct
 import wave
+from pathlib import Path
 from typing import List
 from concurrent.futures import as_completed
 
 from utils.executors import storage_executor
 
 import opuslib
-from google.cloud import storage
-from google.oauth2 import service_account
-from google.cloud.exceptions import NotFound as BlobNotFound
-from google.cloud.exceptions import NotFound
 
 from database.redis_db import cache_signed_url, get_cached_signed_url
 from utils import encryption
@@ -31,86 +43,219 @@ OPUS_FRAME_SIZE = OPUS_SAMPLE_RATE * OPUS_FRAME_DURATION_MS // 1000  # 320 sampl
 # Valid private cloud sync extensions (longest first for correct matching)
 PRIVATE_CLOUD_EXTENSIONS = ['.batch.enc', '.batch.bin', '.opus.enc', '.opus', '.enc', '.bin']
 
-if os.environ.get('SERVICE_ACCOUNT_JSON'):
-    service_account_info = json.loads(os.environ["SERVICE_ACCOUNT_JSON"])
-    credentials = service_account.Credentials.from_service_account_info(service_account_info)
-    storage_client = storage.Client(credentials=credentials)
-else:
-    storage_client = storage.Client()
+# Base path for local filesystem storage
+LOCAL_STORAGE_ROOT = os.environ.get('LOCAL_STORAGE_PATH', '/tmp/omi-storage')
 
-speech_profiles_bucket = os.getenv('BUCKET_SPEECH_PROFILES')
-postprocessing_audio_bucket = os.getenv('BUCKET_POSTPROCESSING')
-memories_recordings_bucket = os.getenv('BUCKET_MEMORIES_RECORDINGS')
-private_cloud_sync_bucket = os.getenv('BUCKET_PRIVATE_CLOUD_SYNC', 'omi-private-cloud-sync')
-syncing_local_bucket = os.getenv('BUCKET_TEMPORAL_SYNC_LOCAL')
-omi_apps_bucket = os.getenv('BUCKET_PLUGINS_LOGOS')
-app_thumbnails_bucket = os.getenv('BUCKET_APP_THUMBNAILS')
-chat_files_bucket = os.getenv('BUCKET_CHAT_FILES')
-desktop_updates_bucket = os.getenv('BUCKET_DESKTOP_UPDATES')
+# Per-bucket subdirectories - maps bucket key to filesystem subdirectory
+# For GCS compatibility, paths within bucket are constructed as: bucket_subdir/path
+# The bucket key is the logical bucket name used in code
+STORAGE_SUBDIRS = {
+    'speech_profiles': 'speech-profiles',
+    'postprocessing_audio': 'postprocessing',
+    'memories_recordings': 'memories-recordings',
+    'private_cloud_sync': 'private-cloud-sync',
+    'temporal_sync': 'temporal-sync',
+    'plugins_logos': 'plugins-logos',
+    'app_thumbnails': 'app-thumbnails',
+    'chat_files': 'chat-files',
+    'desktop_updates': 'desktop-updates',
+}
+
+
+def _get_bucket_path(bucket_key: str, *path_parts) -> Path:
+    """Get filesystem path for a bucket and path components.
+    
+    Args:
+        bucket_key: The logical bucket name (key in STORAGE_SUBDIRS)
+        *path_parts: Path components to join under the bucket
+        
+    Returns:
+        Full filesystem path
+    """
+    bucket_subdir = STORAGE_SUBDIRS.get(bucket_key, bucket_key)
+    # Filter out empty parts from path components
+    filtered_parts = [p for p in path_parts if p]
+    # Use Path for proper multi-segment joins — avoids double-slash issues
+    # When LOCAL_STORAGE_ROOT already ends with the bucket subdir (e.g. tests patching
+    # to /tmp/xyz/private-cloud-sync while bucket_subdir = 'private-cloud-sync'), we avoid
+    # doubling by checking if bucket_subdir is already part of LOCAL_STORAGE_ROOT.
+    root_str = str(Path(LOCAL_STORAGE_ROOT))
+    if root_str.rstrip('/').endswith(bucket_subdir):
+        # Bucket subdir already present in root — use root directly with sub-path
+        return Path(LOCAL_STORAGE_ROOT) / Path(*filtered_parts)
+    return Path(LOCAL_STORAGE_ROOT) / bucket_subdir / Path(*filtered_parts)
+
+
+def _ensure_dir(path: Path) -> None:
+    """Ensure directory exists for a path."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _file_exists(path: Path) -> bool:
+    """Check if file exists."""
+    return path.exists()
+
+
+def _write_file(path: Path, data: bytes, content_type: str = None) -> None:
+    """Write data to file, ensuring parent directory exists."""
+    _ensure_dir(path)
+    path.write_bytes(data)
+
+
+def _read_file(path: Path) -> bytes:
+    """Read file contents."""
+    return path.read_bytes()
+
+
+def _delete_file(path: Path) -> bool:
+    """Delete a file. Returns True if deleted, False if not found."""
+    try:
+        path.unlink()
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def _list_files(prefix: Path) -> List[Path]:
+    """List all files under a prefix path (recursive)."""
+    if not prefix.exists():
+        return []
+    if prefix.is_file():
+        return [prefix]
+    return list(prefix.rglob('*'))
+
+
+def _list_blobs(prefix: Path):
+    """
+    List "blobs" (files) under a prefix.
+    Returns objects with .name, .exists(), .size, .time_created attributes
+    to match GCS blob interface used in this module.
+    """
+
+    class BlobInfo:
+        def __init__(self, path: Path, prefix_path: Path):
+            self.path = path
+            self.prefix_path = prefix_path
+            self.name = str(path.relative_to(prefix_path)) if path.is_relative_to(prefix_path) else str(path)
+            self._stat = None
+
+        def exists(self) -> bool:
+            return self.path.exists()
+
+        @property
+        def size(self) -> int:
+            if self._stat is None:
+                self._stat = self.path.stat()
+            return self._stat.st_size
+
+        @property
+        def time_created(self):
+            if self._stat is None:
+                self._stat = self.path.stat()
+            return datetime.datetime.fromtimestamp(self._stat.st_ctime, tz=datetime.timezone.utc)
+
+        def reload(self):
+            self._stat = self.path.stat()
+
+        def delete(self) -> None:
+            _delete_file(self.path)
+
+        def download_to_filename(self, dest: Path) -> None:
+            dest.write_bytes(_read_file(self.path))
+
+        def download_as_bytes(self) -> bytes:
+            return _read_file(self.path)
+
+        def upload_from_filename(self, src: Path) -> None:
+            _ensure_dir(self.path)
+            self.path.write_bytes(src.read_bytes())
+
+        def upload_from_string(self, data: bytes, content_type: str = None) -> None:
+            _write_file(self.path, data, content_type)
+
+        def open(self, mode='rb', content_type=None):
+            """Open file for reading/writing (streaming)."""
+            _ensure_dir(self.path)
+            return open(self.path, mode)
+
+        def generate_signed_url(self, version=None, expiration=None, method=None):
+            """Return local file path as a 'URL'."""
+            return f'file://{self.path}'
+
+    files = _list_files(prefix)
+    return [BlobInfo(f, prefix) for f in files if f.is_file()]
+
+
+# Bucket handles (simulated GCS bucket interface)
+speech_profiles_bucket = 'speech_profiles'
+postprocessing_audio_bucket = 'postprocessing_audio'
+memories_recordings_bucket = 'memories_recordings'
+private_cloud_sync_bucket = 'private_cloud_sync'
+syncing_local_bucket = 'temporal_sync'
+omi_apps_bucket = 'plugins_logos'
+app_thumbnails_bucket = 'app_thumbnails'
+chat_files_bucket = 'chat_files'
+desktop_updates_bucket = 'desktop_updates'
 
 
 # *******************************************
 # ************* SPEECH PROFILE **************
 # *******************************************
 def upload_profile_audio(file_path: str, uid: str):
-    bucket = storage_client.bucket(speech_profiles_bucket)
-    path = f'{uid}/speech_profile.wav'
-    blob = bucket.blob(path)
-    blob.upload_from_filename(file_path)
-    return f'https://storage.googleapis.com/{speech_profiles_bucket}/{path}'
+    path = _get_bucket_path(speech_profiles_bucket, uid, 'speech_profile.wav')
+    _ensure_dir(path)
+    Path(file_path).copy_to(path)
+    return f'file://{path}'
 
 
 def get_user_has_speech_profile(uid: str, max_age_days: int = None) -> bool:
-    bucket = storage_client.bucket(speech_profiles_bucket)
-    blob = bucket.blob(f'{uid}/speech_profile.wav')
-    if not blob.exists():
+    path = _get_bucket_path(speech_profiles_bucket, uid, 'speech_profile.wav')
+    if not path.exists():
         return False
 
-    # Check age if max_age_days is specified
     if max_age_days is not None:
-        blob.reload()
-        if blob.time_created:
-            age = datetime.datetime.now(datetime.timezone.utc) - blob.time_created
-            if age.days > max_age_days:
-                return False
+        age = datetime.datetime.now(datetime.timezone.utc) - datetime.datetime.fromtimestamp(
+            path.stat().st_ctime, tz=datetime.timezone.utc
+        )
+        if age.days > max_age_days:
+            return False
 
     return True
 
 
 def get_profile_audio_if_exists(uid: str, download: bool = True) -> str:
-    bucket = storage_client.bucket(speech_profiles_bucket)
-    path = f'{uid}/speech_profile.wav'
-    blob = bucket.blob(path)
-    if blob.exists():
+    path = _get_bucket_path(speech_profiles_bucket, uid, 'speech_profile.wav')
+    if path.exists():
         if download:
-            file_path = f'_temp/{uid}_speech_profile.wav'
-            blob.download_to_filename(file_path)
-            return file_path
-        return _get_signed_url(blob, 60)
+            file_path = Path(f'_temp/{uid}_speech_profile.wav')
+            _ensure_dir(file_path)
+            file_path.write_bytes(_read_file(path))
+            return str(file_path)
+        return f'file://{path}'
 
     return None
 
 
 def delete_additional_profile_audio(uid: str, file_name: str) -> None:
-    bucket = storage_client.bucket(speech_profiles_bucket)
-    blob = bucket.blob(f'{uid}/additional_profile_recordings/{file_name}')
-    if blob.exists():
+    path = _get_bucket_path(speech_profiles_bucket, uid, 'additional_profile_recordings', file_name)
+    if path.exists():
         logger.info(f'delete_additional_profile_audio deleting {file_name}')
-        blob.delete()
+        path.unlink()
 
 
 def get_additional_profile_recordings(uid: str, download: bool = False) -> List[str]:
-    bucket = storage_client.bucket(speech_profiles_bucket)
-    blobs = bucket.list_blobs(prefix=f'{uid}/additional_profile_recordings/')
+    prefix = _get_bucket_path(speech_profiles_bucket, uid, 'additional_profile_recordings')
+    blobs = _list_blobs(prefix)
     if download:
         paths = []
         for blob in blobs:
-            file_path = f'_temp/{uid}_{blob.name.split("/")[-1]}'
-            blob.download_to_filename(file_path)
-            paths.append(file_path)
+            file_path = Path(f'_temp/{uid}_{blob.name.split("/")[-1]}')
+            _ensure_dir(file_path)
+            file_path.write_bytes(_read_file(blob.path))
+            paths.append(str(file_path))
         return paths
 
-    return [_get_signed_url(blob, 60) for blob in blobs]
+    return [f'file://{blob.path}' for blob in blobs]
 
 
 # ********************************************
@@ -119,16 +264,14 @@ def get_additional_profile_recordings(uid: str, download: bool = False) -> List[
 
 
 def delete_user_person_speech_sample(uid: str, person_id: str, file_name: str) -> None:
-    bucket = storage_client.bucket(speech_profiles_bucket)
-    blob = bucket.blob(f'{uid}/people_profiles/{person_id}/{file_name}')
-    if blob.exists():
-        blob.delete()
+    path = _get_bucket_path(speech_profiles_bucket, uid, 'people_profiles', person_id, file_name)
+    if path.exists():
+        path.unlink()
 
 
 def delete_user_person_speech_samples(uid: str, person_id: str) -> None:
-    bucket = storage_client.bucket(speech_profiles_bucket)
-    blobs = bucket.list_blobs(prefix=f'{uid}/people_profiles/{person_id}/')
-    for blob in blobs:
+    prefix = _get_bucket_path(speech_profiles_bucket, uid, 'people_profiles', person_id)
+    for blob in _list_blobs(prefix):
         blob.delete()
 
 
@@ -138,7 +281,7 @@ def upload_person_speech_sample_from_bytes(
     person_id: str,
     sample_rate: int = 16000,
 ) -> str:
-    """Upload PCM audio bytes as WAV speech sample. Returns GCS path."""
+    """Upload PCM audio bytes as WAV speech sample. Returns filesystem path."""
     import uuid as uuid_module
 
     wav_buffer = io.BytesIO()
@@ -148,70 +291,63 @@ def upload_person_speech_sample_from_bytes(
         wav_file.setframerate(sample_rate)
         wav_file.writeframes(audio_bytes)
 
-    bucket = storage_client.bucket(speech_profiles_bucket)
     filename = f"{uuid_module.uuid4()}.wav"
-    path = f'{uid}/people_profiles/{person_id}/{filename}'
-    blob = bucket.blob(path)
-    blob.upload_from_string(wav_buffer.getvalue(), content_type='audio/wav')
+    path = _get_bucket_path(speech_profiles_bucket, uid, 'people_profiles', person_id, filename)
+    _write_file(path, wav_buffer.getvalue(), 'audio/wav')
 
-    return path
+    return str(path)
 
 
 def get_user_people_ids(uid: str) -> List[str]:
-    bucket = storage_client.bucket(speech_profiles_bucket)
-    blobs = bucket.list_blobs(prefix=f'{uid}/people_profiles/')
-    return [blob.name.split("/")[-2] for blob in blobs]
+    prefix = _get_bucket_path(speech_profiles_bucket, uid, 'people_profiles')
+    blobs = _list_blobs(prefix)
+    return [blob.name.split("/")[-2] for blob in blobs if '/' in blob.name]
 
 
 def get_user_person_speech_samples(uid: str, person_id: str, download: bool = False) -> List[str]:
-    bucket = storage_client.bucket(speech_profiles_bucket)
-    blobs = bucket.list_blobs(prefix=f'{uid}/people_profiles/{person_id}/')
+    prefix = _get_bucket_path(speech_profiles_bucket, uid, 'people_profiles', person_id)
+    blobs = _list_blobs(prefix)
     if download:
         paths = []
         for blob in blobs:
-            file_path = f'_temp/{uid}_person_{blob.name.split("/")[-1]}'
-            blob.download_to_filename(file_path)
-            paths.append(file_path)
+            file_path = Path(f'_temp/{uid}_person_{blob.name.split("/")[-1]}')
+            _ensure_dir(file_path)
+            file_path.write_bytes(_read_file(blob.path))
+            paths.append(str(file_path))
         return paths
 
-    return [_get_signed_url(blob, 60) for blob in blobs]
+    return [f'file://{blob.path}' for blob in blobs]
 
 
 def get_speech_sample_signed_urls(paths: List[str]) -> List[str]:
     """
-    Generate signed URLs for speech samples given their GCS paths.
-    Uses the paths stored in Firestore instead of listing GCS blobs.
+    Generate file:// URLs for speech samples given their filesystem paths.
 
     Args:
-        paths: List of GCS paths (e.g., '{uid}/people_profiles/{person_id}/{filename}')
+        paths: List of filesystem paths
 
     Returns:
-        List of signed URLs
+        List of file:// URLs
     """
     if not paths:
         return []
-    bucket = storage_client.bucket(speech_profiles_bucket)
-    signed_urls = []
-    for path in paths:
-        blob = bucket.blob(path)
-        signed_urls.append(_get_signed_url(blob, 60))
-    return signed_urls
+    return [f'file://{p}' if not p.startswith('file://') else p for p in paths]
 
 
 # ********************************************
 # ************* POST PROCESSING **************
 # ********************************************
 def upload_postprocessing_audio(file_path: str):
-    bucket = storage_client.bucket(postprocessing_audio_bucket)
-    blob = bucket.blob(file_path)
-    blob.upload_from_filename(file_path)
-    return f'https://storage.googleapis.com/{postprocessing_audio_bucket}/{file_path}'
+    filename = Path(file_path).name
+    path = _get_bucket_path(postprocessing_audio_bucket, filename)
+    _ensure_dir(path)
+    Path(file_path).copy_to(path)
+    return f'file://{path}'
 
 
 def delete_postprocessing_audio(file_path: str):
-    bucket = storage_client.bucket(postprocessing_audio_bucket)
-    blob = bucket.blob(file_path)
-    blob.delete()
+    path = _get_bucket_path(postprocessing_audio_bucket, file_path)
+    _delete_file(path)
 
 
 # ***********************************
@@ -220,16 +356,16 @@ def delete_postprocessing_audio(file_path: str):
 
 
 def upload_sdcard_audio(file_path: str):
-    bucket = storage_client.bucket(postprocessing_audio_bucket)
-    blob = bucket.blob(file_path)
-    blob.upload_from_filename(file_path)
-    return f'https://storage.googleapis.com/{postprocessing_audio_bucket}/sdcard/{file_path}'
+    filename = Path(file_path).name
+    path = _get_bucket_path(postprocessing_audio_bucket, 'sdcard', filename)
+    _ensure_dir(path)
+    Path(file_path).copy_to(path)
+    return f'file://{path}'
 
 
 def download_postprocessing_audio(file_path: str, destination_file_path: str):
-    bucket = storage_client.bucket(postprocessing_audio_bucket)
-    blob = bucket.blob(file_path)
-    blob.download_to_filename(destination_file_path)
+    path = _get_bucket_path(postprocessing_audio_bucket, file_path)
+    Path(destination_file_path).write_bytes(_read_file(path))
 
 
 # ************************************************
@@ -238,31 +374,28 @@ def download_postprocessing_audio(file_path: str, destination_file_path: str):
 
 
 def upload_conversation_recording(file_path: str, uid: str, conversation_id: str):
-    bucket = storage_client.bucket(memories_recordings_bucket)
-    path = f'{uid}/{conversation_id}.wav'
-    blob = bucket.blob(path)
-    blob.upload_from_filename(file_path)
-    return f'https://storage.googleapis.com/{memories_recordings_bucket}/{path}'
+    path = _get_bucket_path(memories_recordings_bucket, uid, f'{conversation_id}.wav')
+    _ensure_dir(path)
+    Path(file_path).copy_to(path)
+    return f'file://{path}'
 
 
 def get_conversation_recording_if_exists(uid: str, memory_id: str) -> str:
     logger.info(f'get_conversation_recording_if_exists {uid} {memory_id}')
-    bucket = storage_client.bucket(memories_recordings_bucket)
-    path = f'{uid}/{memory_id}.wav'
-    blob = bucket.blob(path)
-    if blob.exists():
-        file_path = f'_temp/{memory_id}.wav'
-        blob.download_to_filename(file_path)
-        return file_path
+    path = _get_bucket_path(memories_recordings_bucket, uid, f'{memory_id}.wav')
+    if path.exists():
+        file_path = Path(f'_temp/{memory_id}.wav')
+        _ensure_dir(file_path)
+        file_path.write_bytes(_read_file(path))
+        return str(file_path)
     return None
 
 
 def delete_all_conversation_recordings(uid: str):
     if not uid:
         return
-    bucket = storage_client.bucket(memories_recordings_bucket)
-    blobs = bucket.list_blobs(prefix=uid)
-    for blob in blobs:
+    prefix = _get_bucket_path(memories_recordings_bucket, uid)
+    for blob in _list_blobs(prefix):
         blob.delete()
 
 
@@ -270,26 +403,22 @@ def delete_all_conversation_recordings(uid: str):
 # ************* SYNCING FILES **************
 # ********************************************
 def get_syncing_file_temporal_url(file_path: str):
-    bucket = storage_client.bucket(syncing_local_bucket)
-    blob = bucket.blob(file_path)
-    blob.upload_from_filename(file_path)
-    return f'https://storage.googleapis.com/{syncing_local_bucket}/{file_path}'
+    path = _get_bucket_path(syncing_local_bucket, file_path)
+    _ensure_dir(path)
+    Path(file_path).copy_to(path)
+    return f'file://{path}'
 
 
 def get_syncing_file_temporal_signed_url(file_path: str):
-    bucket = storage_client.bucket(syncing_local_bucket)
-    blob = bucket.blob(file_path)
-    blob.upload_from_filename(file_path)
-    return _get_signed_url(blob, 15)
+    path = _get_bucket_path(syncing_local_bucket, file_path)
+    _ensure_dir(path)
+    Path(file_path).copy_to(path)
+    return f'file://{path}'
 
 
 def delete_syncing_temporal_file(file_path: str):
-    bucket = storage_client.bucket(syncing_local_bucket)
-    blob = bucket.blob(file_path)
-    try:
-        blob.delete()
-    except BlobNotFound:
-        pass
+    path = _get_bucket_path(syncing_local_bucket, file_path)
+    _delete_file(path)
 
 
 # ************************************************
@@ -391,7 +520,7 @@ def decode_opus_to_pcm(opus_data: bytes, sample_rate: int = OPUS_SAMPLE_RATE, ch
 
 
 def _get_extension_for_path(path: str) -> str:
-    """Extract the private cloud sync extension from a GCS path."""
+    """Extract the private cloud sync extension from a path."""
     if path.endswith('.batch.enc'):
         return 'batch.enc'
     elif path.endswith('.batch.bin'):
@@ -423,7 +552,7 @@ def upload_audio_chunk(
     chunk_data: bytes, uid: str, conversation_id: str, timestamp: float, data_protection_level: str = None
 ) -> str:
     """
-    Upload an audio chunk to Google Cloud Storage with optional encryption.
+    Upload an audio chunk to local filesystem storage with optional encryption.
 
     Args:
         chunk_data: Raw audio bytes (PCM16)
@@ -434,9 +563,8 @@ def upload_audio_chunk(
             skips the per-chunk Firestore read. Falls back to DB read when None.
 
     Returns:
-        GCS path of the uploaded chunk
+        Filesystem path of the uploaded chunk
     """
-    bucket = storage_client.bucket(private_cloud_sync_bucket)
     protection_level = (
         data_protection_level if data_protection_level is not None else users_db.get_data_protection_level(uid)
     )
@@ -448,16 +576,14 @@ def upload_audio_chunk(
 
     if protection_level == 'enhanced':
         encrypted_chunk = encryption.encrypt_audio_chunk(upload_data, uid)
-        path = f'chunks/{uid}/{conversation_id}/{formatted_timestamp}.opus.enc'
-        blob = bucket.blob(path)
-        blob.upload_from_string(encrypted_chunk, content_type='application/octet-stream')
+        path = _get_bucket_path(private_cloud_sync_bucket, 'chunks', uid, conversation_id, f'{formatted_timestamp}.opus.enc')
+        _write_file(path, encrypted_chunk, 'application/octet-stream')
     else:
-        path = f'chunks/{uid}/{conversation_id}/{formatted_timestamp}.opus'
-        blob = bucket.blob(path)
-        blob.upload_from_string(upload_data, content_type='application/octet-stream')
+        path = _get_bucket_path(private_cloud_sync_bucket, 'chunks', uid, conversation_id, f'{formatted_timestamp}.opus')
+        _write_file(path, upload_data, 'application/octet-stream')
 
     del upload_data
-    return path
+    return str(path)
 
 
 def upload_audio_chunks_batch(
@@ -467,9 +593,9 @@ def upload_audio_chunks_batch(
     data_protection_level: str = None,
 ) -> List[str]:
     """
-    Upload multiple audio chunks to GCS in a single streaming write.
+    Upload multiple audio chunks to local filesystem in a single write.
 
-    Concatenates all chunk data into one GCS object (1 write op instead of N).
+    Concatenates all chunk data into one file (1 write op instead of N).
 
     Args:
         chunks: List of dicts with 'data' (bytes) and 'timestamp' (float).
@@ -479,7 +605,7 @@ def upload_audio_chunks_batch(
             skips the Firestore read. Falls back to DB read when None.
 
     Returns:
-        List of GCS paths for the uploaded batch.
+        List of filesystem paths for the uploaded batch.
     """
     if not chunks:
         return []
@@ -492,40 +618,37 @@ def upload_audio_chunks_batch(
         data_protection_level if data_protection_level is not None else users_db.get_data_protection_level(uid)
     )
 
-    bucket = storage_client.bucket(private_cloud_sync_bucket)
-
     # Build batch filename from first and last timestamps
     first_ts = f'{sorted_chunks[0]["timestamp"]:.3f}'
     last_ts = f'{sorted_chunks[-1]["timestamp"]:.3f}'
     batch_name = f'{first_ts}-{last_ts}' if len(sorted_chunks) > 1 else first_ts
 
     if protection_level == 'enhanced':
-        # Encrypt each chunk individually (length-prefixed), stream to GCS
-        path = f'chunks/{uid}/{conversation_id}/{batch_name}.batch.enc'
-        blob = bucket.blob(path)
-        with blob.open('wb', content_type='application/octet-stream') as f:
+        # Encrypt each chunk individually (length-prefixed), write to file
+        path = _get_bucket_path(private_cloud_sync_bucket, 'chunks', uid, conversation_id, f'{batch_name}.batch.enc')
+        _ensure_dir(path)
+        with open(path, 'wb') as f:
             for chunk in sorted_chunks:
                 encrypted_chunk = encryption.encrypt_audio_chunk(chunk['data'], uid)
                 f.write(encrypted_chunk)
                 del encrypted_chunk
     else:
-        # Standard — stream raw PCM data to GCS
-        path = f'chunks/{uid}/{conversation_id}/{batch_name}.batch.bin'
-        blob = bucket.blob(path)
-        with blob.open('wb', content_type='application/octet-stream') as f:
+        # Standard — stream raw PCM data to file
+        path = _get_bucket_path(private_cloud_sync_bucket, 'chunks', uid, conversation_id, f'{batch_name}.batch.bin')
+        _ensure_dir(path)
+        with open(path, 'wb') as f:
             for chunk in sorted_chunks:
                 f.write(chunk['data'])
 
-    return [path]
+    return [str(path)]
 
 
 def delete_audio_chunks(uid: str, conversation_id: str, timestamps: List[float]) -> None:
     """Delete audio chunks after they've been merged.
 
-    Handles both single-chunk blobs (per-timestamp lookup) and batch blobs
+    Handles both single-chunk files (per-timestamp lookup) and batch files
     (listed and matched by start timestamp).
     """
-    bucket = storage_client.bucket(private_cloud_sync_bucket)
     deleted_batch_paths = set()
 
     for timestamp in timestamps:
@@ -536,24 +659,21 @@ def delete_audio_chunks(uid: str, conversation_id: str, timestamps: List[float])
         for extension in PRIVATE_CLOUD_EXTENSIONS:
             if extension in ('.batch.enc', '.batch.bin'):
                 continue  # batch blobs handled separately below
-            chunk_path = f'chunks/{uid}/{conversation_id}/{formatted_timestamp}{extension}'
-            blob = bucket.blob(chunk_path)
-            if blob.exists():
-                blob.delete()
+            chunk_path = _get_bucket_path(private_cloud_sync_bucket, 'chunks', uid, conversation_id, f'{formatted_timestamp}{extension}')
+            if chunk_path.exists():
+                chunk_path.unlink()
 
         # Try batch blobs: exact single-timestamp batch (e.g. "1000.000.batch.bin")
         for batch_ext in ('.batch.enc', '.batch.bin'):
-            batch_path = f'chunks/{uid}/{conversation_id}/{formatted_timestamp}{batch_ext}'
-            if batch_path not in deleted_batch_paths:
-                blob = bucket.blob(batch_path)
-                if blob.exists():
-                    blob.delete()
-                    deleted_batch_paths.add(batch_path)
+            batch_path = _get_bucket_path(private_cloud_sync_bucket, 'chunks', uid, conversation_id, f'{formatted_timestamp}{batch_ext}')
+            if str(batch_path) not in deleted_batch_paths and batch_path.exists():
+                batch_path.unlink()
+                deleted_batch_paths.add(str(batch_path))
 
     # Scan for range-named batch blobs whose start timestamp matches any requested timestamp
     ts_set = {f'{ts:.3f}' for ts in timestamps}
-    prefix = f'chunks/{uid}/{conversation_id}/'
-    for blob in bucket.list_blobs(prefix=prefix):
+    prefix = _get_bucket_path(private_cloud_sync_bucket, 'chunks', uid, conversation_id)
+    for blob in _list_blobs(prefix):
         if blob.name in deleted_batch_paths:
             continue
         filename = blob.name.split('/')[-1]
@@ -574,9 +694,8 @@ def list_audio_chunks(uid: str, conversation_id: str) -> List[dict]:
     Returns:
         List of dicts with chunk info: {'timestamp': float, 'path': str, 'size': int}
     """
-    bucket = storage_client.bucket(private_cloud_sync_bucket)
-    prefix = f'chunks/{uid}/{conversation_id}/'
-    blobs = bucket.list_blobs(prefix=prefix)
+    prefix = _get_bucket_path(private_cloud_sync_bucket, 'chunks', uid, conversation_id)
+    blobs = _list_blobs(prefix)
 
     chunks = []
     for blob in blobs:
@@ -613,16 +732,14 @@ def list_audio_chunks(uid: str, conversation_id: str) -> List[dict]:
 
 def delete_conversation_audio_files(uid: str, conversation_id: str) -> None:
     """Delete all audio files (chunks and merged) for a conversation."""
-    bucket = storage_client.bucket(private_cloud_sync_bucket)
-
     # Delete chunks
-    chunks_prefix = f'chunks/{uid}/{conversation_id}/'
-    for blob in bucket.list_blobs(prefix=chunks_prefix):
+    chunks_prefix = _get_bucket_path(private_cloud_sync_bucket, 'chunks', uid, conversation_id)
+    for blob in _list_blobs(chunks_prefix):
         blob.delete()
 
     # Delete merged files
-    audio_prefix = f'audio/{uid}/{conversation_id}/'
-    for blob in bucket.list_blobs(prefix=audio_prefix):
+    audio_prefix = _get_bucket_path(private_cloud_sync_bucket, 'audio', uid, conversation_id)
+    for blob in _list_blobs(audio_prefix):
         blob.delete()
 
 
@@ -651,9 +768,7 @@ def download_audio_chunks_and_merge(
         Merged audio bytes (PCM16)
     """
 
-    bucket = storage_client.bucket(private_cloud_sync_bucket)
-
-    # Resolve actual GCS paths — needed to find batch blobs whose filenames
+    # Resolve actual filesystem paths — needed to find batch blobs whose filenames
     # contain timestamp ranges instead of single timestamps
     actual_chunks = list_audio_chunks(uid, conversation_id)
     ts_set = {round(ts, 3) for ts in timestamps}
@@ -685,15 +800,17 @@ def download_audio_chunks_and_merge(
         elif round(chunk['timestamp'], 3) in ts_set:
             single_chunk_timestamps.append(chunk['timestamp'])
 
-    def _download_and_decode_blob(path: str) -> bytes | None:
+    def _download_and_decode_blob(filename: str) -> bytes | None:
         """Download a blob and decode/decrypt based on extension."""
-        ext = _get_extension_for_path(path)
+        full_path = _get_bucket_path(private_cloud_sync_bucket, 'chunks', uid, conversation_id, filename)
+
+        ext = _get_extension_for_path(filename)
         encrypted = ext in ('opus.enc', 'enc', 'batch.enc')
         is_opus = ext in ('opus.enc', 'opus')
 
         try:
-            chunk_data = bucket.blob(path).download_as_bytes()
-        except NotFound:
+            chunk_data = _read_file(full_path)
+        except FileNotFoundError:
             return None
 
         try:
@@ -710,7 +827,7 @@ def download_audio_chunks_and_merge(
 
             return pcm_data
         except Exception as e:
-            logger.warning(f"Failed to decode/decrypt {path}: {e}")
+            logger.warning(f"Failed to decode/decrypt {filename}: {e}")
             return None
 
     def download_single_chunk(timestamp: float) -> tuple[float, bytes | None]:
@@ -725,10 +842,9 @@ def download_audio_chunks_and_merge(
         ]
 
         for ext, encrypted, opus in extensions_to_try:
-            chunk_path = f'chunks/{uid}/{conversation_id}/{formatted_timestamp}.{ext}'
             try:
-                chunk_data = bucket.blob(chunk_path).download_as_bytes()
-            except NotFound:
+                chunk_data = _read_file(_get_bucket_path(private_cloud_sync_bucket, 'chunks', uid, conversation_id, f'{formatted_timestamp}.{ext}'))
+            except FileNotFoundError:
                 continue
 
             try:
@@ -764,7 +880,7 @@ def download_audio_chunks_and_merge(
     individual_futures = {storage_executor.submit(download_single_chunk, ts): ts for ts in individual_timestamps}
 
     # Submit batch blob downloads (once per unique path)
-    batch_futures = {storage_executor.submit(_download_and_decode_blob, path): path for path in unique_batch_paths}
+    batch_futures = {storage_executor.submit(_download_and_decode_blob, path.split('/')[-1]): path for path in unique_batch_paths}
 
     # Collect individual results
     for future in as_completed(individual_futures):
@@ -826,8 +942,8 @@ def download_audio_chunks_and_merge(
 
 
 def get_cached_merged_audio_path(uid: str, conversation_id: str, audio_file_id: str) -> str:
-    """Get the GCS path for a cached merged audio file."""
-    return f'merged/{uid}/{conversation_id}/{audio_file_id}.wav'
+    """Get the filesystem path for a cached merged audio file."""
+    return f'audio/{uid}/{conversation_id}/{audio_file_id}.wav'
 
 
 def get_or_create_merged_audio(
@@ -841,7 +957,7 @@ def get_or_create_merged_audio(
 ) -> tuple[bytes, bool]:
     """
     Get merged audio from cache or create it.
-    Cached files are stored in GCS with 1-day TTL (via lifecycle policy).
+    Cached files are stored in local filesystem with no TTL (filesystem persistence).
 
     Args:
         uid: User ID
@@ -855,30 +971,15 @@ def get_or_create_merged_audio(
     Returns:
         Tuple of (audio_data_bytes, was_cached)
     """
-    bucket = storage_client.bucket(private_cloud_sync_bucket)
-    cache_path = get_cached_merged_audio_path(uid, conversation_id, audio_file_id)
-    cache_blob = bucket.blob(cache_path)
+    cache_rel_path = get_cached_merged_audio_path(uid, conversation_id, audio_file_id)
+    cache_path = _get_bucket_path(private_cloud_sync_bucket, cache_rel_path)
 
-    # Check if cached version exists and is not expired
-    if cache_blob.exists():
-        # Check custom metadata for expiry
-        cache_blob.reload()
-        metadata = cache_blob.metadata or {}
-        expires_at_str = metadata.get('expires_at')
+    # Check if cached version exists
+    if cache_path.exists():
+        logger.info(f"Serving merged audio from cache: {cache_path}")
+        return _read_file(cache_path), True
 
-        if expires_at_str:
-            try:
-                expires_at = datetime.datetime.fromisoformat(expires_at_str)
-                if datetime.datetime.now(datetime.timezone.utc) < expires_at:
-                    # Cache is valid, return it
-                    logger.info(f"Serving merged audio from cache: {cache_path}")
-                    return cache_blob.download_as_bytes(), True
-                else:
-                    logger.warning(f"Cache expired for: {cache_path}")
-            except (ValueError, TypeError):
-                pass
-
-    # Cache miss or expired - create new merged file
+    # Cache miss - create new merged file
     logger.info(f"Cache miss, merging audio for: {cache_path}")
 
     # Download and merge chunks
@@ -890,15 +991,11 @@ def get_or_create_merged_audio(
     wav_data = pcm_to_wav_func(pcm_data)
     del pcm_data  # Free PCM data immediately after WAV conversion
 
-    # Upload to cache in background thread with 3-day TTL
+    # Upload to cache in background thread
     def _upload_to_cache():
         try:
-            expires_at = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=3)
-            cache_blob.metadata = {
-                'expires_at': expires_at.isoformat(),
-                'audio_file_id': audio_file_id,
-            }
-            cache_blob.upload_from_string(wav_data, content_type='audio/wav')
+            _ensure_dir(cache_path)
+            _write_file(cache_path, wav_data, 'audio/wav')
             logger.info(f"Cached merged audio at: {cache_path}")
         except Exception as e:
             logger.error(f"Error uploading audio cache: {e}")
@@ -910,40 +1007,24 @@ def get_or_create_merged_audio(
 
 def get_merged_audio_signed_url(uid: str, conversation_id: str, audio_file_id: str) -> str | None:
     """
-    Get a signed URL for cached merged audio if it exists and is valid.
+    Get a file:// URL for cached merged audio if it exists.
 
     Returns:
-        Signed URL valid for 1 hour, or None if cache doesn't exist
+        file:// URL, or None if cache doesn't exist
     """
-    bucket = storage_client.bucket(private_cloud_sync_bucket)
-    cache_path = get_cached_merged_audio_path(uid, conversation_id, audio_file_id)
-    cache_blob = bucket.blob(cache_path)
+    cache_rel_path = get_cached_merged_audio_path(uid, conversation_id, audio_file_id)
+    cache_path = _get_bucket_path(private_cloud_sync_bucket, cache_rel_path)
 
-    if not cache_blob.exists():
+    if not cache_path.exists():
         return None
 
-    # Check expiry
-    cache_blob.reload()
-    metadata = cache_blob.metadata or {}
-    expires_at_str = metadata.get('expires_at')
-
-    if expires_at_str:
-        try:
-            expires_at = datetime.datetime.fromisoformat(expires_at_str)
-            if datetime.datetime.now(datetime.timezone.utc) >= expires_at:
-                return None  # Expired
-        except (ValueError, TypeError):
-            pass
-
-    # Generate signed URL valid for 1 hour
-    return _get_signed_url(cache_blob, 60)
+    return f'file://{cache_path}'
 
 
 def delete_cached_merged_audio(uid: str, conversation_id: str) -> None:
     """Delete all cached merged audio for a conversation."""
-    bucket = storage_client.bucket(private_cloud_sync_bucket)
-    prefix = f'merged/{uid}/{conversation_id}/'
-    for blob in bucket.list_blobs(prefix=prefix):
+    prefix = _get_bucket_path(private_cloud_sync_bucket, 'audio', uid, conversation_id)
+    for blob in _list_blobs(prefix):
         blob.delete()
 
 
@@ -1011,111 +1092,99 @@ def precache_conversation_audio(
 
 def download_blob_bytes(bucket_name: str, path: str) -> bytes:
     """
-    Download blob content as bytes from GCS.
+    Download blob content as bytes from local filesystem.
 
     Args:
-        bucket_name: Name of the GCS bucket
-        path: Path to the blob within the bucket
+        bucket_name: Name of the storage bucket (maps to subdirectory)
+        path: Path within the bucket
 
     Returns:
-        Blob content as bytes
+        File content as bytes
 
     Raises:
-        NotFound: If the blob doesn't exist
+        FileNotFoundError: If the file doesn't exist
     """
-    bucket = storage_client.bucket(bucket_name)
-    blob = bucket.blob(path)
-    return blob.download_as_bytes()
+    file_path = _get_bucket_path(bucket_name, path)
+    return _read_file(file_path)
 
 
 def delete_blob(bucket_name: str, path: str) -> bool:
     """
-    Delete a blob from GCS.
+    Delete a blob from local filesystem.
 
     Args:
-        bucket_name: Name of the GCS bucket
-        path: Path to the blob within the bucket
+        bucket_name: Name of the storage bucket (maps to subdirectory)
+        path: Path within the bucket
 
     Returns:
         True if deleted, False if not found
     """
-    bucket = storage_client.bucket(bucket_name)
-    blob = bucket.blob(path)
-    try:
-        blob.delete()
-        return True
-    except NotFound:
-        return False
+    file_path = _get_bucket_path(bucket_name, path)
+    return _delete_file(file_path)
 
 
 def download_speech_profile_bytes(path: str) -> bytes:
     """
-    Download speech profile/sample audio from GCS.
+    Download speech profile/sample audio from local filesystem.
 
     Args:
-        path: GCS path to the sample (e.g., '{uid}/people_profiles/{person_id}/{filename}.wav')
+        path: Filesystem path to the sample (e.g., '{uid}/people_profiles/{person_id}/{filename}.wav')
 
     Returns:
         Audio bytes (WAV format)
 
     Raises:
-        NotFound: If the sample doesn't exist
+        FileNotFoundError: If the sample doesn't exist
     """
-    return download_blob_bytes(speech_profiles_bucket, path)
+    # path is already a relative path, parse it
+    parts = path.split('/')
+    return download_blob_bytes(speech_profiles_bucket, *parts)
 
 
 def delete_speech_profile_blob(path: str) -> bool:
     """
-    Delete speech profile/sample from GCS.
+    Delete speech profile/sample from local filesystem.
 
     Args:
-        path: GCS path to the sample
+        path: Filesystem path to the sample
 
     Returns:
         True if deleted, False if not found
     """
-    return delete_blob(speech_profiles_bucket, path)
+    parts = path.split('/')
+    return delete_blob(speech_profiles_bucket, *parts)
 
 
-def _get_signed_url(blob, minutes):
-    if cached := get_cached_signed_url(blob.name):
-        return cached
-
-    signed_url = blob.generate_signed_url(version="v4", expiration=datetime.timedelta(minutes=minutes), method="GET")
-    cache_signed_url(blob.name, signed_url, minutes * 60)
-    return signed_url
+def _get_signed_url(path: Path, minutes: int) -> str:
+    """Return a file:// URL for a local path."""
+    # For filesystem storage, signed URL is just the file path
+    return f'file://{path}'
 
 
 def upload_app_logo(file_path: str, app_id: str):
-    bucket = storage_client.bucket(omi_apps_bucket)
-    path = f'{app_id}.png'
-    blob = bucket.blob(path)
-    blob.cache_control = 'public, no-cache'
-    blob.upload_from_filename(file_path)
-    return f'https://storage.googleapis.com/{omi_apps_bucket}/{path}'
+    path = _get_bucket_path(omi_apps_bucket, f'{app_id}.png')
+    _ensure_dir(path)
+    Path(file_path).copy_to(path)
+    return f'file://{path}'
 
 
 def delete_app_logo(img_url: str):
-    bucket = storage_client.bucket(omi_apps_bucket)
-    path = img_url.split(f'https://storage.googleapis.com/{omi_apps_bucket}/')[1]
+    path = img_url.split('file://')[1] if 'file://' in img_url else img_url
+    path = Path(path)
     logger.info(f'delete_app_logo {path}')
-    blob = bucket.blob(path)
-    blob.delete()
+    _delete_file(path)
 
 
 def upload_app_thumbnail(file_path: str, thumbnail_id: str) -> str:
-    bucket = storage_client.bucket(app_thumbnails_bucket)
-    path = f'{thumbnail_id}.jpg'
-    blob = bucket.blob(path)
-    blob.cache_control = 'public, no-cache'
-    blob.upload_from_filename(file_path)
-    public_url = f'https://storage.googleapis.com/{app_thumbnails_bucket}/{path}'
-    return public_url
+    path = _get_bucket_path(app_thumbnails_bucket, f'{thumbnail_id}.jpg')
+    _ensure_dir(path)
+    Path(file_path).copy_to(path)
+    return f'file://{path}'
 
 
 def get_app_thumbnail_url(thumbnail_id: str) -> str:
-    path = f'{thumbnail_id}.jpg'
-    return f'https://storage.googleapis.com/{app_thumbnails_bucket}/{path}'
+    path = _get_bucket_path(app_thumbnails_bucket, f'{thumbnail_id}.jpg')
+    return f'file://{path}'
 
 
 # **********************************
@@ -1123,27 +1192,22 @@ def get_app_thumbnail_url(thumbnail_id: str) -> str:
 # **********************************
 def upload_multi_chat_files(files_name: List[str], uid: str) -> dict:
     """
-    Upload multiple files to Google Cloud Storage in the chat files bucket.
+    Upload multiple files to local filesystem storage in the chat files bucket.
 
     Args:
         files_name: List of file paths to upload
         uid: User ID to use as part of the storage path
 
     Returns:
-        dict: A dictionary mapping original filenames to their Google Cloud Storage URLs
+        dict: A dictionary mapping original filenames to their local filesystem URLs
     """
-    bucket = storage_client.bucket(chat_files_bucket)
     dictFiles = {}
     for name in files_name:
         try:
-            blob = bucket.blob(f'{uid}/{name}')
-            blob.cache_control = 'public, no-cache'
-            blob.upload_from_filename(f'./{name}')
-            try:
-                blob.make_public()
-            except Exception as e:
-                logger.warning(f"Could not make blob public (may need bucket-level IAM): {e}")
-            dictFiles[name] = f'https://storage.googleapis.com/{chat_files_bucket}/{uid}/{name}'
+            path = _get_bucket_path(chat_files_bucket, uid, name)
+            _ensure_dir(path)
+            Path(f'./{name}').copy_to(path)
+            dictFiles[name] = f'file://{path}'
         except Exception as e:
             logger.error("Failed to upload {} due to exception: {}".format(name, e))
     return dictFiles
@@ -1156,17 +1220,14 @@ def upload_multi_chat_files(files_name: List[str], uid: str) -> dict:
 
 def get_desktop_update_signed_url(blob_path: str, expiration_hours: int = 1) -> str:
     """
-    Generate a signed URL for a desktop update file (ZIP).
+    Generate a URL for a desktop update file (ZIP).
 
     Args:
-        blob_path: Path to the blob in GCS (e.g., "1.0.78+474-macos/1.0.78+474-macos.zip")
-        expiration_hours: Hours until the URL expires (default: 1 hour)
+        blob_path: Path to the file (e.g., "1.0.78+474-macos/1.0.78+474-macos.zip")
+        expiration_hours: Hours until the URL expires (unused for local storage, default: 1 hour)
 
     Returns:
-        Signed URL valid for the specified duration
+        file:// URL valid for the specified duration
     """
-    bucket = storage_client.bucket(desktop_updates_bucket)
-    blob = bucket.blob(blob_path)
-
-    # Use existing _get_signed_url helper with caching
-    return _get_signed_url(blob, expiration_hours * 60)
+    path = _get_bucket_path(desktop_updates_bucket, blob_path)
+    return f'file://{path}'

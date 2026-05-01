@@ -4,8 +4,14 @@ enum AppBuild {
   static let productionBundleIdentifier = "com.omi.computer-macos"
   private static let updateChannelDefaultsKey = "update_channel"
   private static let betaOverwriteMigrationKey = "didMigrateBetaOverwrite_v1"
-  private static let desktopAppcastURL = URL(
-    string: "https://api.omi.me/v2/desktop/appcast.xml?platform=macos")!
+  /// Appcast URL for desktop updates. Returns nil in LOCAL_MODE — no remote update checks.
+  private static var desktopAppcastURL: URL? {
+    // In LOCAL_MODE, skip remote update checks entirely.
+    if ProcessInfo.processInfo.environment["LOCAL_MODE"] == "1" {
+      return nil
+    }
+    return URL(string: "https://api.omi.me/v2/desktop/appcast.xml?platform=macos")
+  }
 
   static var bundleIdentifier: String {
     Bundle.main.bundleIdentifier ?? productionBundleIdentifier
@@ -181,7 +187,10 @@ enum AppBuild {
     let semaphore = DispatchSemaphore(value: 0)
     var appcastXML: String?
 
-    let task = session.dataTask(with: desktopAppcastURL) { data, _, _ in
+    guard let appcastURL = desktopAppcastURL else {
+      return fallback
+    }
+    let task = session.dataTask(with: appcastURL) { data, _, _ in
       defer { semaphore.signal() }
       guard let data, let xml = String(data: data, encoding: .utf8) else { return }
       appcastXML = xml

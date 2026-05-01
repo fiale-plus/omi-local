@@ -152,12 +152,19 @@ impl CalendarMeetingContext {
 }
 
 /// LLM Client for calling Gemini (AI Studio or Vertex AI)
+/// LLM Client — supports both Gemini cloud API and OpenAI-compatible local gateway.
+/// In LOCAL_MODE with LOCAL_LLM_BASE_URL/LOCAL_LLM_MODEL set, all calls route to the
+/// local gateway (ollama, lmstudio, etc.) using the OpenAI `/v1/chat/completions` protocol.
 pub struct LlmClient {
     client: Client,
+    /// For Gemini cloud: the API key. For local gateway: "local" placeholder.
     api_key: String,
+    /// The resolved model name (Gemini model or local model ID).
     model: String,
     /// When set, uses Vertex AI endpoints with Bearer auth instead of API key.
     vertex_auth: Option<crate::vertex::VertexAuth>,
+    /// When set, all calls use this base URL (OpenAI-compatible) instead of Gemini.
+    local_base_url: Option<String>,
 }
 
 // Gemini API types
@@ -214,12 +221,28 @@ struct GeminiPartResponse {
 
 impl LlmClient {
     /// Create a new Gemini client with the QoS-configured default model.
-    pub fn new(api_key: String) -> Self {
+    ///
+    /// `local_base_url` and `local_model` set the local gateway.
+    /// When both are `Some`, all calls go to the local OpenAI-compatible endpoint.
+    pub fn new(api_key: String, local_base_url: Option<String>, local_model: Option<String>) -> Self {
+        let model = local_model.unwrap_or_else(|| super::model_qos::gemini_default().to_string());
         Self {
             client: Client::new(),
             api_key,
             model: super::model_qos::gemini_default().to_string(),
             vertex_auth: None,
+            model,
+            local_base_url,
+        }
+    }
+
+    /// Create a new client targeting a local gateway directly.
+    pub fn new_local(base_url: String, model: String, api_key: String) -> Self {
+        Self {
+            client: Client::new(),
+            api_key,
+            model,
+            local_base_url: Some(base_url),
         }
     }
 
@@ -273,7 +296,15 @@ impl LlmClient {
     }
 
     /// Call the LLM with a specific JSON schema for structured output
+    /// Call the LLM with a specific JSON schema for structured output.
+/// Routes to the local OpenAI-compatible gateway when `local_base_url` is set,
+/// otherwise uses the Gemini cloud API.
     pub async fn call_with_schema(&self, prompt: &str, temperature: Option<f32>, max_tokens: Option<i32>, schema: Option<serde_json::Value>) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        // Route to local gateway if configured
+        if let Some(base_url) = &self.local_base_url {
+            return self.call_local_openai(prompt, temperature, max_tokens, schema, false).await;
+        }
+
         let request = GeminiRequest {
             contents: vec![GeminiContent {
                 parts: vec![GeminiPart {
@@ -299,6 +330,87 @@ impl LlmClient {
         Ok(result.candidates.first()
             .and_then(|c| c.content.parts.first())
             .map(|p| p.text.clone())
+            .unwrap_or_default())
+    }
+
+    /// Call an OpenAI-compatible local gateway (Ollama, LMStudio, etc.).
+    /// Formats the request as `/v1/chat/completions` and parses the `choices[0].message.content` field.
+    async fn call_local_openai(
+        &self,
+        prompt: &str,
+        temperature: Option<f32>,
+        max_tokens: Option<i32>,
+        schema: Option<serde_json::Value>,
+        _is_text: bool,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        #[derive(Serialize)]
+        struct OpenAIRequest {
+            model: String,
+            messages: Vec<OpenAIMessage>,
+            temperature: Option<f32>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            max_tokens: Option<i32>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            response_format: Option<serde_json::Value>,
+        }
+
+        #[derive(Serialize)]
+        struct OpenAIMessage {
+            role: &'static str,
+            content: String,
+        }
+
+        let mut body = OpenAIRequest {
+            model: self.model.clone(),
+            messages: vec![OpenAIMessage { role: "user", content: prompt.to_string() }],
+            temperature,
+            max_tokens,
+            response_format: None,
+        };
+
+        // If a JSON schema is provided and the model supports it (e.g. Ollama with a JSON-mode model),
+        // pass it via extra_body / response_format. Some local servers respect a schema hint.
+        if let Some(s) = schema {
+            // Ollama-compatible `format: "json"` via extra body, or structured output hint.
+            // We pass it as `response_format: { type: "json_object" }` for compatible servers.
+            body.response_format = Some(serde_json::json!({
+                "type": "json_object",
+                "schema": s
+            }));
+        }
+
+        let url = format!("{}/chat/completions", self.local_base_url.as_ref().unwrap());
+        let request = self.client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .json(&body);
+
+        let response = request.send().await?;
+
+        if !response.status().is_success() {
+            let error = response.text().await?;
+            return Err(format!("Local LLM error: {}", error).into());
+        }
+
+        #[derive(Deserialize)]
+        struct OpenAIResponse {
+            choices: Vec<OpenAIChoice>,
+        }
+
+        #[derive(Deserialize)]
+        struct OpenAIChoice {
+            message: OpenAIMessageContent,
+        }
+
+        #[derive(Deserialize)]
+        struct OpenAIMessageContent {
+            content: Option<String>,
+        }
+
+        let result: OpenAIResponse = response.json().await?;
+        Ok(result.choices.first()
+            .and_then(|c| c.message.content.clone())
             .unwrap_or_default())
     }
 
@@ -845,8 +957,14 @@ impl LlmClient {
         self.call_text(&full_prompt, Some(0.7), Some(2000)).await
     }
 
-    /// Call Gemini API with text (non-JSON) response
+    /// Call Gemini API with text (non-JSON) response.
+/// Routes to the local OpenAI-compatible gateway when `local_base_url` is set.
     pub async fn call_text(&self, prompt: &str, temperature: Option<f32>, max_tokens: Option<i32>) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        // Route to local gateway if configured
+        if let Some(_) = &self.local_base_url {
+            return self.call_local_openai(prompt, temperature, max_tokens, None, true).await;
+        }
+
         #[derive(Debug, Serialize)]
         struct GeminiTextRequest {
             contents: Vec<GeminiContent>,

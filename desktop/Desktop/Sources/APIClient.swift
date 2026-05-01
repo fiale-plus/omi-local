@@ -6,6 +6,16 @@ actor APIClient {
   // Beta release channel uses the dev service; stable uses production or explicit local env.
   var baseURL: String {
     DesktopBackendEnvironment.pythonBaseURL()
+    if let cString = getenv("OMI_PYTHON_API_URL"), let url = String(validatingUTF8: cString),
+      !url.isEmpty
+    {
+      return url.hasSuffix("/") ? url : url + "/"
+    }
+    // NOTE: No silent fallback to production. In LOCAL_MODE the app must have
+    // OMI_PYTHON_API_URL explicitly set. If this fires, check that .env has
+    // OMI_PYTHON_API_URL configured for local operation.
+    NSLog("OMI PYTHON API: OMI_PYTHON_API_URL not set — API calls will fail. Set OMI_PYTHON_API_URL in .env for LOCAL_MODE=1")
+    return ""
   }
 
   // Rust desktop backend URL — used only for: agent VM provisioning/status,

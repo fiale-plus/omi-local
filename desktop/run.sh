@@ -10,7 +10,10 @@ Build and run the Omi Desktop dev app with local backend services.
 
 Options (via environment variables):
   OMI_SKIP_BACKEND=1      Skip starting Rust backend (use remote backend via OMI_DESKTOP_API_URL)
+  OMI_SKIP_AUTH=1         Skip starting Python auth service (use remote auth via OMI_AUTH_URL)
   OMI_SKIP_TUNNEL=1        Skip Cloudflare tunnel (use OMI_DESKTOP_API_URL from .env directly)
+  LOCAL_MODE=1            Skip all local services — use OMI_DESKTOP_API_URL, OMI_AUTH_URL, and OMI_PYTHON_API_URL from .env directly
+  AUTH_PORT=10200         Auth service port (default: 10200)
   PORT=10201                Rust backend port (default: 10201, never use 8080)
   OMI_APP_NAME="Omi Dev"   App name (default: "Omi Dev")
   OMI_PYTHON_API_URL="..."  Python backend URL (subscriptions, payments, etc; default: https://api.omi.me)
@@ -58,6 +61,37 @@ if [ "$1" = "--yolo" ]; then
     export OMI_DESKTOP_API_URL="https://desktop-backend-hhibjajaja-uc.a.run.app"
     export OMI_PYTHON_API_URL="https://api.omi.me"
     export FIREBASE_API_KEY="AIzaSyD9dzBdglc7IO9pPDIOvqnCoTis_xKkkC8"
+fi
+
+# ─── Local Mode ─────────────────────────────────────────────────────
+# Fully local dev without starting any services. The app uses the
+# OMI_API_URL, OMI_AUTH_URL, and OMI_PYTHON_API_URL values directly.
+# IMPORTANT: No production endpoints are contacted in this mode.
+# All URLs must be explicitly set in .env — no silent fallbacks exist.
+if [ "${LOCAL_MODE:-0}" = "1" ]; then
+    echo ""
+    echo "=========================================="
+    echo "  LOCAL MODE — local URLs from .env only"
+    echo "=========================================="
+    echo ""
+    echo "  Skipping: Rust backend, Python auth, Cloudflare tunnel"
+    echo "  Firebase: bypassed (AuthService uses stored tokens)"
+    echo "  API calls: MUST use explicit OMI_PYTHON_API_URL"
+    echo "  Production endpoints: NOT contacted (no silent fallback)"
+    echo ""
+    echo "  OMI_API_URL=${OMI_API_URL:-<not set>}"
+    echo "  OMI_AUTH_URL=${OMI_AUTH_URL:-<not set>}"
+    echo "  OMI_PYTHON_API_URL=${OMI_PYTHON_API_URL:-<not set>}"
+    echo ""
+    echo "  If OMI_PYTHON_API_URL is unset, run.sh will EXIT with an error"
+    echo "  rather than silently falling back to api.omi.me"
+    echo ""
+    echo "=========================================="
+    echo ""
+
+    export OMI_SKIP_BACKEND=1
+    export OMI_SKIP_AUTH=1
+    export OMI_SKIP_TUNNEL=1
 fi
 
 # Clear system OPENAI_API_KEY so .env takes precedence
@@ -337,7 +371,43 @@ if [ "${OMI_SKIP_BACKEND:-0}" != "1" ]; then
         sleep 0.5
     done
 else
-    substep "Skipping backend (OMI_SKIP_BACKEND=1) — using OMI_DESKTOP_API_URL from .env"
+substep "Skipping backend (OMI_SKIP_BACKEND=1) — using OMI_DESKTOP_API_URL from .env"
+fi
+
+# ─── Start Python auth service ────────────────────────────────────────
+# Skip auth service if OMI_SKIP_AUTH=*** or LOCAL_MODE=1 (local auth bypass)
+if [ "${OMI_SKIP_AUTH:-0}" != "1" ] && [ "${LOCAL_MODE:-0}" != "1" ]; then
+    step "Starting Python auth service (port $AUTH_PORT)..."
+    if [ -d "$AUTH_DIR" ]; then
+        # Set up venv if needed
+        if [ ! -d "$AUTH_DIR/.venv" ]; then
+            substep "Creating virtualenv..."
+            python3 -m venv "$AUTH_DIR/.venv"
+            "$AUTH_DIR/.venv/bin/pip" install -q -r "$AUTH_DIR/requirements.txt"
+        fi
+        # Auth service shares credentials with the Rust backend
+        (
+            cd "$AUTH_DIR"
+            if [ -f "$BACKEND_DIR/.env" ]; then
+                set -a; source "$BACKEND_DIR/.env"; set +a
+            fi
+            export GOOGLE_APPLICATION_CREDENTIALS="$CREDS_PATH"
+            export BASE_API_URL="http://localhost:$AUTH_PORT"
+            .venv/bin/uvicorn main:app --host 0.0.0.0 --port "$AUTH_PORT" --log-level warning &
+            echo $!
+        ) &
+        AUTH_PID=$!
+        sleep 1
+        if curl -s "http://localhost:$AUTH_PORT/docs" > /dev/null 2>&1; then
+            substep "Auth service is ready on port $AUTH_PORT"
+        else
+            substep "Auth service starting (PID: $AUTH_PID)..."
+        fi
+    else
+        substep "Auth-Python/ not found — skipping (auth will use OMI_AUTH_URL from .env)"
+    fi
+else
+    substep "Skipping auth service (OMI_SKIP_AUTH=*** or LOCAL_MODE=1 — using OMI_AUTH_URL from .env)"
 fi
 
 # Check if another SwiftPM instance is running (will block our build)
@@ -506,12 +576,29 @@ if ! grep -q "^OMI_PYTHON_API_URL=" "$APP_BUNDLE/Contents/Resources/.env"; then
     if [ -z "$PYTHON_API_URL" ] && [ -f "$BACKEND_DIR/.env" ]; then
         PYTHON_API_URL=$(grep "^OMI_PYTHON_API_URL=" "$BACKEND_DIR/.env" | head -1 | cut -d= -f2-)
     fi
+    # In LOCAL_MODE=1, require explicit OMI_PYTHON_API_URL — no silent production fallback
     if [ -z "$PYTHON_API_URL" ]; then
-        PYTHON_API_URL="https://api.omi.me"
-        substep "OMI_PYTHON_API_URL not set — defaulting to production: $PYTHON_API_URL"
+        if [ "${LOCAL_MODE:-0}" = "1" ]; then
+            echo "ERROR: LOCAL_MODE=1 requires OMI_PYTHON_API_URL to be explicitly set."
+            echo "       The app must not contact production endpoints when LOCAL_MODE=1."
+            echo "       Set OMI_PYTHON_API_URL in desktop/Backend-Rust/.env"
+            exit 1
+        else
+            PYTHON_API_URL="https://api.omi.me"
+            substep "OMI_PYTHON_API_URL not set — defaulting to production: $PYTHON_API_URL"
+        fi
     fi
     echo "OMI_PYTHON_API_URL=$PYTHON_API_URL" >> "$APP_BUNDLE/Contents/Resources/.env"
     substep "Set OMI_PYTHON_API_URL=$PYTHON_API_URL"
+fi
+# Bootstrap LOCAL_MODE — set to 1 in the app's .env so AuthService skips Firebase
+if [ "${LOCAL_MODE:-0}" = "1" ]; then
+    if grep -q "^LOCAL_MODE=" "$APP_BUNDLE/Contents/Resources/.env"; then
+        sed -i '' "s|^LOCAL_MODE=.*|LOCAL_MODE=1|" "$APP_BUNDLE/Contents/Resources/.env"
+    else
+        echo "LOCAL_MODE=1" >> "$APP_BUNDLE/Contents/Resources/.env"
+    fi
+    substep "LOCAL_MODE=1 — app will bypass Firebase Auth"
 fi
 
 substep "Copying app icon"
@@ -687,8 +774,21 @@ echo "========================================"
 echo ""
 
 auth_debug "BEFORE launch: $(defaults read "$BUNDLE_ID" auth_isSignedIn 2>&1 || true)"
+# Build launch args: LOCAL_MODE if set, plus automation bridge args
+LAUNCH_ARGS=()
+if [ "${LOCAL_MODE:-0}" = "1" ]; then
+    LAUNCH_ARGS+=(--LOCAL_MODE=1)
+    substep "LOCAL_MODE=1 — Firebase auth bypassed"
+fi
 if [ "${#AUTOMATION_ARGS[@]}" -gt 0 ]; then
-    open "$APP_PATH" --args "${AUTOMATION_ARGS[@]}" || "$APP_PATH/Contents/MacOS/$BINARY_NAME" "${AUTOMATION_ARGS[@]}" &
+    LAUNCH_ARGS+=("${AUTOMATION_ARGS[@]}")
+fi
+
+# In LOCAL_MODE, also export LOCAL_MODE=1 so the app's ProcessInfo sees it
+if [ "${LOCAL_MODE:-0}" = "1" ]; then
+    (export LOCAL_MODE=1 && open "$APP_PATH" --args "${LAUNCH_ARGS[@]}" || "$APP_PATH/Contents/MacOS/$BINARY_NAME" "${LAUNCH_ARGS[@]}") &
+elif [ ${#LAUNCH_ARGS[@]} -gt 0 ]; then
+    open "$APP_PATH" --args "${LAUNCH_ARGS[@]}" || "$APP_PATH/Contents/MacOS/$BINARY_NAME" "${LAUNCH_ARGS[@]}" &
 else
     open "$APP_PATH" || "$APP_PATH/Contents/MacOS/$BINARY_NAME" &
 fi

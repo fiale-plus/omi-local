@@ -18,6 +18,28 @@ use crate::models::{
 };
 use crate::AppState;
 
+/// Factory function to create LLM client, routing to local gateway in LOCAL_MODE.
+/// Falls back to error if no API key is available and LOCAL_MODE is not configured.
+fn make_llm(state: &AppState, api_key: String) -> Result<LlmClient, (StatusCode, String)> {
+    if state.config.local_mode
+        && state.config.local_llm_base_url.is_some()
+        && state.config.local_llm_model.is_some()
+    {
+        let base_url = state.config.local_llm_base_url.clone().unwrap();
+        let model = state.config.local_llm_model.clone().unwrap();
+        let local_key = state
+            .config
+            .local_llm_api_key
+            .clone()
+            .unwrap_or_else(|| "local".to_string());
+        Ok(LlmClient::new_local(base_url, model, local_key))
+    } else {
+        Ok(LlmClient::new(api_key).with_model(
+            crate::llm::model_qos::gemini_extraction(),
+        ))
+    }
+}
+
 #[derive(Deserialize)]
 pub struct GetConversationsQuery {
     #[serde(default = "default_limit")]
@@ -194,10 +216,19 @@ async fn create_conversation_from_segments(
                 .with_vertex(state.vertex_auth.clone())
                 .with_model(crate::llm::model_qos::gemini_extraction())
         } else {
+        // Get LLM client (Gemini)
+        let llm_client = if let Some(api_key) = &state.config.gemini_api_key {
+            make_llm(state, api_key.clone())?
+        } else if !state.config.local_mode
+            || state.config.local_llm_base_url.is_none()
+            || state.config.local_llm_model.is_none()
+        {
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "GEMINI_API_KEY not configured".to_string(),
             ));
+        } else {
+            unreachable!()
         };
 
         // Get existing data for deduplication
@@ -446,10 +477,19 @@ async fn reprocess_conversation(
             .with_vertex(state.vertex_auth.clone())
             .with_model(crate::llm::model_qos::gemini_extraction())
     } else {
+    // Get LLM client (Gemini)
+    let llm_client = if let Some(api_key) = &state.config.gemini_api_key {
+        make_llm(state, api_key.clone())?
+    } else if !state.config.local_mode
+        || state.config.local_llm_base_url.is_none()
+        || state.config.local_llm_model.is_none()
+    {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             "GEMINI_API_KEY not configured".to_string(),
         ));
+    } else {
+        unreachable!()
     };
 
     // Build transcript text
@@ -851,15 +891,42 @@ async fn merge_conversations(
 
             // Get existing data for deduplication
             let existing_memories = state
+        let Some(api_key) = &state.config.gemini_api_key else {
+            // No Gemini key — in LOCAL_MODE this shouldn't happen (make_llm would have succeeded),
+            // but if it does, just mark as completed without LLM processing
+            if state.config.local_mode
+                && state.config.local_llm_base_url.is_some()
+                && state.config.local_llm_model.is_some()
+            {
+                tracing::error!("LOCAL_MODE configured but GEMINI_API_KEY missing — cannot use local LLM without a placeholder key");
+            }
+            merged_conversation.status = ConversationStatus::Completed;
+            state
                 .firestore
-                .get_memories(&user.uid, 500)
+                .save_conversation(&user.uid, &merged_conversation)
                 .await
-                .unwrap_or_default();
+                .map_err(|e| {
+                    tracing::error!("Failed to save merged conversation: {}", e);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Failed to save merged conversation: {}", e),
+                    )
+                })?;
+            return Ok(Json(serde_json::json!({ "conversation_id": merged_conversation.id })));
+        };
+        let llm = make_llm(state, api_key.clone())?;
 
-            let started_at_str = merged_conversation.started_at.to_rfc3339();
+        // Get existing data for deduplication
+        let existing_memories = state
+            .firestore
+            .get_memories(&user.uid, 500)
+            .await
+            .unwrap_or_default();
 
-            // Process with LLM
-            match llm
+        let started_at_str = merged_conversation.started_at.to_rfc3339();
+
+        // Process with LLM
+        match llm
                 .process_conversation(
                     &merged_conversation.transcript_segments,
                     &started_at_str,
@@ -911,10 +978,6 @@ async fn merge_conversations(
                     merged_conversation.status = ConversationStatus::Completed;
                 }
             }
-        } else {
-            // No LLM key, just mark as completed
-            merged_conversation.status = ConversationStatus::Completed;
-        }
     } else {
         merged_conversation.status = ConversationStatus::Completed;
     }

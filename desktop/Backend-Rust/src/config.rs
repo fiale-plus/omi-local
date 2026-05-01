@@ -85,6 +85,20 @@ pub struct Config {
     pub vertex_project_id: Option<String>,
     /// GCP region for Vertex AI (default: us-central1)
     pub vertex_location: String,
+    /// Enable local-first offline mode (bypasses Firestore, uses SQLite)
+    pub local_mode: bool,
+    /// Path for the local SQLite database (default: ./omi_local.db)
+    pub local_db_path: Option<String>,
+    /// OpenAI-compatible base URL for local LLM gateway (e.g. http://localhost:11434/v1)
+    /// Used when LOCAL_MODE=1 to route all LLM calls to a local model server.
+    pub local_llm_base_url: Option<String>,
+    /// Model name to request from the local LLM gateway.
+    /// Example values: "llama3", "mistral", "gemma3:4b" (Ollama model names).
+    pub local_llm_model: Option<String>,
+    /// API key for the local LLM gateway (optional for most local servers like Ollama).
+    pub local_llm_api_key: Option<String>,
+    /// Bind to localhost only (for development)
+    pub bind_localhost: bool,
 }
 
 impl Config {
@@ -158,6 +172,13 @@ impl Config {
                 .ok(),
             vertex_location: env::var("GCP_LOCATION")
                 .unwrap_or_else(|_| "us-central1".to_string()),
+            local_mode: env::var("LOCAL_MODE").ok().map(|v| v == "1" || v.to_lowercase() == "true").unwrap_or(false),
+            local_db_path: env::var("LOCAL_DB_PATH").ok(),
+            bind_localhost: env::var("BIND_LOCALHOST").map(|v| v == "true").unwrap_or(false),
+            local_llm_base_url: env::var("LOCAL_LLM_BASE_URL").ok(),
+            local_llm_model: env::var("LOCAL_LLM_MODEL").ok(),
+            local_llm_api_key: env::var("LOCAL_LLM_API_KEY").ok(),
+            bind_localhost: env::var("BIND_LOCALHOST").map(|v| v == "true").unwrap_or(false),
         }
     }
 
@@ -175,11 +196,31 @@ impl Config {
         } else if self.gemini_api_key.is_none() {
             tracing::warn!("GEMINI_API_KEY not set - conversation processing will fail");
         }
+        if self.local_mode {
+            tracing::warn!("LOCAL_MODE enabled - using development auth bypass (DO NOT USE IN PRODUCTION)");
+        }
+        if self.bind_localhost {
+            tracing::info!("BIND_LOCALHOST enabled - server will listen on 127.0.0.1 only");
+        }
         if self.redis_host.is_none() {
             tracing::warn!("REDIS_DB_HOST not set - conversation visibility/sharing will not work");
         }
         if self.encryption_secret.is_none() {
             tracing::warn!("ENCRYPTION_SECRET not set — encrypted user data will not be decryptable");
+        }
+        if self.local_mode {
+            tracing::info!("LOCAL_MODE enabled — using SQLite backend, bypassing Firestore");
+        }
+        if self.local_mode && self.local_llm_base_url.is_some() && self.local_llm_model.is_some() {
+            tracing::info!(
+                "LOCAL_MODE LLM: base_url={} model={}",
+                self.local_llm_base_url.as_ref().unwrap(),
+                self.local_llm_model.as_ref().unwrap()
+            );
+        } else if self.local_mode && self.local_llm_base_url.is_none() {
+            tracing::warn!(
+                "LOCAL_MODE=1 but LOCAL_LLM_BASE_URL not set — LLM extraction will be skipped"
+            );
         }
         Ok(())
     }
